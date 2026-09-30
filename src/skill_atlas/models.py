@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
 
@@ -60,6 +61,7 @@ class ScanResult:
     ref: str | None = None
     web_base_url: str | None = None
     similar: list[SimilarGroup] = field(default_factory=list)
+    matrix: list[list[int]] = field(default_factory=list)
 
     @property
     def skill_count(self) -> int:
@@ -68,6 +70,24 @@ class ScanResult:
     @property
     def similar_count(self) -> int:
         return len(self.similar)
+
+    @property
+    def comparable(self) -> bool:
+        """Whether the report can offer its pairwise comparison, which needs two skills.
+
+        A one-skill scan produces a matrix of one empty row -- truthy, and nothing to
+        compare -- so the count of rows is what decides, not the matrix being non-empty.
+        """
+        return len(self.matrix) > 1
+
+    @property
+    def matrix_json(self) -> str:
+        """:attr:`matrix` as compact JSON, for the report to carry in an attribute.
+
+        Whole percentages only, so there is no punctuation here for HTML escaping to
+        mangle on the way into the document and none for a reader to have to decode.
+        """
+        return json.dumps(self.matrix, separators=(",", ":"))
 
     def web_url_for(self, skill: Skill) -> str | None:
         """Browsable URL for a skill file, when the host layout is known."""

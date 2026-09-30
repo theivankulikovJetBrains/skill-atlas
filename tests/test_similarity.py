@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from skill_atlas.models import Skill
-from skill_atlas.similarity import DEFAULT_THRESHOLD, find_similar, similarity
+from skill_atlas.similarity import DEFAULT_THRESHOLD, MAX_COMPARABLE, find_similar, pairwise, similarity
 
 
 def skill(name: str, description: str = "", path: str | None = None) -> Skill:
@@ -181,6 +181,48 @@ class TestGrouping:
         ]
         skills = [skill(name, description) for name, description in collection]
         assert [group.names for group in find_similar(skills)] == [("code-review", "security-review")]
+
+
+class TestPairwise:
+    """The full triangle the report compares arbitrary pairs from."""
+
+    THREE = [
+        skill("deploy", "Deploy the service to production.", "a/SKILL.md"),
+        skill("deploy", "Deploy the service to production.", "b/SKILL.md"),
+        skill("resize", "Shrinks an image to fit a box.", "c/SKILL.md"),
+    ]
+
+    def test_a_row_per_skill_holding_the_pairs_before_it(self):
+        """Row i has i entries, so row and column indexes are the skills' own."""
+        assert [len(row) for row in pairwise(self.THREE)] == [0, 1, 2]
+
+    def test_a_copy_scores_a_hundred_and_a_stranger_does_not(self):
+        matrix = pairwise(self.THREE)
+        assert matrix[1][0] == 100
+        assert matrix[2][0] < 30
+        assert matrix[2][1] == matrix[2][0]  # the same pair from the other side
+
+    def test_every_cell_is_the_public_score_in_whole_percent(self):
+        matrix = pairwise(self.THREE)
+        for i, left in enumerate(self.THREE):
+            for j in range(i):
+                assert matrix[i][j] == round(similarity(left, self.THREE[j]) * 100)
+
+    def test_no_pair_is_scored_outside_the_scale(self):
+        assert all(0 <= cell <= 100 for row in pairwise(self.THREE) for cell in row)
+
+    def test_the_threshold_does_not_reach_the_matrix(self):
+        """A reader comparing two skills wants the number, grouped or not."""
+        matrix = pairwise(self.THREE)
+        assert find_similar(self.THREE) != []  # a and b group ...
+        assert matrix[2][0] > 0  # ... and c, which groups with nothing, is still scored
+
+    @pytest.mark.parametrize(("skills", "expected"), [([], []), ([skill("lonely", "Alone.")], [[]])])
+    def test_too_few_skills_to_compare(self, skills, expected):
+        assert pairwise(skills) == expected
+
+    def test_the_cap_leaves_room_for_a_realistic_collection(self):
+        assert MAX_COMPARABLE >= 100
 
 
 class TestThreshold:
