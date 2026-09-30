@@ -365,7 +365,30 @@ class TestSimilarityFlags:
         out = capsys.readouterr().out
         assert "Found 3 skills:" in out  # the skills themselves are untouched
         assert "Similar skills" not in out
-        assert "Similar groups" not in (in_tmp_cwd / "report.html").read_text(encoding="utf-8")
+        html = (in_tmp_cwd / "report.html").read_text(encoding="utf-8")
+        assert "Similar groups" not in html
+        assert "data-scores" not in html  # the matrix is a comparison too
+
+    def test_the_report_carries_the_scores_for_comparing_by_hand(self, fake_clone, in_tmp_cwd):
+        fake_clone(TWINS)
+        assert cli.main(["scan", URL]) == 0
+        html = (in_tmp_cwd / "report.html").read_text(encoding="utf-8")
+        assert 'class="compare"' in html
+        # Three skills, so a triangle of three pairs -- one of which is the two copies.
+        assert 'data-scores="[[],[100],' in html
+
+    def test_a_collection_past_the_cap_keeps_the_groups_and_drops_the_matrix(
+        self, fake_clone, in_tmp_cwd, monkeypatch, capsys
+    ):
+        """The payload is quadratic; the groups are not, so only the matrix has to go."""
+        monkeypatch.setattr(cli, "MAX_COMPARABLE", 2)
+        fake_clone(TWINS)
+        assert cli.main(["scan", URL]) == 0
+
+        assert "Similar skills (1 group;" in capsys.readouterr().out
+        html = (in_tmp_cwd / "report.html").read_text(encoding="utf-8")
+        assert "Similar groups <b>1</b>" in html
+        assert "data-scores" not in html
 
     def test_raising_the_bar_to_one_keeps_only_identical_skills(self, fake_clone, capsys):
         fake_clone(

@@ -28,6 +28,13 @@ from .models import SimilarGroup, Skill
 NAME_WEIGHT = 0.4
 DESCRIPTION_WEIGHT = 0.6
 
+#: How many skills the report will still offer a pairwise comparison for. The payload
+#: is one number per pair, so it grows as the square of the collection: 200 skills is
+#: 19,900 numbers, some 70 KB of a file that has to stay standalone, and already the
+#: widest grid a reader can do anything with. Past that the report keeps the groups --
+#: bounded by what actually resembles something -- and drops the matrix.
+MAX_COMPARABLE = 200
+
 #: Calibrated against a real skill collection rather than picked for roundness. Across
 #: one, the highest-scoring pair that is merely on a shared topic ("summarize-channel"
 #: and "standup") reached 0.42, and the lowest-scoring pair that really was one skill
@@ -113,6 +120,24 @@ def _ceiling(a: _Prepared, b: _Prepared) -> float:
 def similarity(a: Skill, b: Skill) -> float:
     """How alike two skills read, from ``0.0`` (nothing in common) to ``1.0`` (identical)."""
     return _similarity(_prepare(a), _prepare(b))
+
+
+def pairwise(skills: Sequence[Skill]) -> list[list[int]]:
+    """Every pair's resemblance in whole percent, as a lower triangle.
+
+    Row ``i`` holds the scores against rows ``0`` to ``i - 1``, so ``matrix[i][j]`` is
+    the pair ``(i, j)`` whenever ``j < i``. The symmetric half is not stored because the
+    score does not depend on the order of the pair, nor is the diagonal, because a skill
+    is always identical to itself. The first row is empty rather than absent, so a row's
+    index stays equal to its skill's index in ``skills`` -- which is what lets the report
+    address a pair by two row numbers.
+
+    Where :func:`find_similar` skips pairs that its cheap bound says cannot reach the
+    threshold, this scores every pair in full: there is no threshold here, and a reader
+    comparing two skills by hand wants the number even when the answer is 9%.
+    """
+    prepared = [_prepare(skill) for skill in skills]
+    return [[round(_similarity(left, prepared[j]) * 100) for j in range(i)] for i, left in enumerate(prepared)]
 
 
 def find_similar(skills: Sequence[Skill], threshold: float = DEFAULT_THRESHOLD) -> list[SimilarGroup]:

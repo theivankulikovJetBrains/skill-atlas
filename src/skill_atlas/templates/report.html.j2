@@ -15,6 +15,17 @@
     --accent: #3b5bdb;
     --warn-bg: #fff4e5;
     --warn-text: #8a4b00;
+    {# One hue, four steps, light to dark: a similarity is a magnitude, and a magnitude
+       gets a sequential ramp rather than a spread of hues. Every step keeps its text
+       above 4.5:1 -- the number in the cell is the real answer and the tint only ranks
+       it, so the tint must never be what makes the number hard to read. The top step is
+       the exception that buys the range: it goes past where the body ink can follow and
+       takes the inverted ink with it, which is also what makes it unmistakable. #}
+    --heat-1: #e8f1fd;
+    --heat-2: #cde2fb;
+    --heat-3: #6da7ec;
+    --heat-4: #1c5cab;
+    --heat-ink: #ffffff;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -26,6 +37,16 @@
       --accent: #8da2fb;
       --warn-bg: #3a2a10;
       --warn-text: #f0b866;
+      {# Chosen for this surface, not flipped: the light ramp runs toward dark, which on a
+         dark page would drive the strongest cells back into the background. These four
+         climb away from it instead, and the top one climbs clear past the body ink -- a
+         dark surface leaves so little room beneath it that without that step the two
+         strongest bands would be a shade apart. #}
+      --heat-1: #172a45;
+      --heat-2: #103a72;
+      --heat-3: #1c5cab;
+      --heat-4: #86b6ef;
+      --heat-ink: #17171a;
     }
   }
   * { box-sizing: border-box; }
@@ -51,7 +72,13 @@
     font-family: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace;
     font-size: .855em;
   }
-  .search { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem; margin: 0 0 1rem; }
+  .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem 1rem; margin: 0 0 1rem; }
+  .search { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem; flex: 1 1 20rem; min-width: 0; }
+  {# The line above is why this one has to exist: `display` from a stylesheet beats the
+     browser's own `[hidden] { display: none }` whatever the specificity, so the attribute
+     the box ships with does nothing until it is honoured here. The button and the grid
+     below need no such rule -- neither of them is given a `display` to override. #}
+  .search[hidden] { display: none; }
   .search input {
     flex: 1 1 20rem; min-width: 0;
     padding: .55rem .8rem;
@@ -61,12 +88,25 @@
   }
   .search input:focus-visible { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 1px; }
   .search-status { color: var(--muted); font-size: .85rem; }
+  button {
+    padding: .55rem .85rem;
+    background: var(--surface); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    font: inherit; font-size: .9rem; cursor: pointer;
+  }
+  button:hover:enabled { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   table { width: 100%; border-collapse: collapse; }
   caption { text-align: left; font-size: .8rem; color: var(--muted); padding-bottom: .5rem; }
   th, td { text-align: left; padding: .8rem .75rem; border-bottom: 1px solid var(--border); vertical-align: top; }
   th { font-size: .75rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
   tbody tr:hover { background: var(--surface); }
   td.name { font-weight: 600; white-space: nowrap; }
+  {# Ships collapsed, like the search box above: ticking a row does nothing until the
+     script at the end of the document is there to compare what was ticked. #}
+  th.pick, td.pick { display: none; width: 1px; padding-right: 0; }
+  table.pickable th.pick, table.pickable td.pick { display: table-cell; }
   th.path, td.path { width: 34%; }
   td.path a { color: var(--accent); text-decoration: none; overflow-wrap: break-word; }
   td.path a:hover { text-decoration: underline; }
@@ -85,6 +125,49 @@
     background: var(--surface); border: 1px dashed var(--border); border-radius: 8px;
   }
   .no-matches td { padding: 2.5rem .75rem; text-align: center; color: var(--muted); }
+  .compare { margin-top: 3rem; }
+  .compare-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+  .compare h2 { margin: 0 0 .3rem; font-size: 1.1rem; letter-spacing: -.01em; }
+  .compare .hint { margin: 0 0 .9rem; color: var(--muted); font-size: .85rem; }
+  .scale { display: flex; flex-wrap: wrap; gap: .3rem .9rem; margin: 0 0 1rem; padding: 0; list-style: none; }
+  .scale li { display: flex; align-items: center; gap: .35rem; color: var(--muted); font-size: .78rem; }
+  .scale .swatch { width: 1.3rem; height: .75rem; border: 1px solid var(--border); border-radius: 3px; }
+  {# The grid is as wide as the selection, which can outgrow the page; scrolling it
+     rather than the document keeps the row names pinned beside the cells they label. #}
+  .matrix-scroll { overflow-x: auto; }
+  {# Separate borders, not the collapsed grid the skills table uses: a 2px gap of page
+     between two tinted cells is what stops neighbouring shades reading as one block. #}
+  table.matrix { width: auto; border-collapse: separate; border-spacing: 2px; }
+  table.matrix th, table.matrix td {
+    border-bottom: none; border-radius: 4px;
+    padding: .4rem .55rem; font-size: .8rem;
+  }
+  table.matrix th {
+    text-transform: none; letter-spacing: normal;
+    color: var(--text); font-weight: 600; white-space: nowrap;
+  }
+  table.matrix th.col { text-align: center; }
+  {# The directory, when a name alone does not say which copy this is. Its own line, so a
+     column is never widened by more than the path it had to spell out. #}
+  table.matrix th small {
+    display: block; font-weight: 400; color: var(--muted);
+    font-family: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace;
+    font-size: .85em;
+  }
+  {# Pinned to the left edge, and opaque, so a row keeps its name once the grid scrolls. #}
+  table.matrix th.row { position: sticky; left: 0; background: var(--bg); }
+  table.matrix td { min-width: 3.4rem; text-align: center; font-variant-numeric: tabular-nums; }
+  table.matrix tbody tr:hover { background: none; }
+  table.matrix td:hover { outline: 2px solid var(--accent); outline-offset: -1px; }
+  table.matrix td.self { color: var(--muted); }
+  {# Unscoped on purpose: the legend's swatches and the grid's cells have to be the same
+     four colours, and one band saying so once is how they stay that way. #}
+  [data-heat="1"] { background: var(--heat-1); }
+  [data-heat="2"] { background: var(--heat-2); }
+  [data-heat="3"] { background: var(--heat-3); }
+  {# Weight as well as tint on the top band, so the strongest pairs survive a
+     colourblind reader, a greyscale print and a forced-colors mode alike. #}
+  [data-heat="4"] { background: var(--heat-4); color: var(--heat-ink); font-weight: 700; }
   .similar { margin-top: 3rem; }
   .similar h2 { margin: 0 0 .3rem; font-size: 1.1rem; letter-spacing: -.01em; }
   .similar .hint { margin: 0 0 1rem; color: var(--muted); font-size: .85rem; }
@@ -129,17 +212,31 @@
   </div>
 
   {% if result.skills %}
-    {# Ships hidden: filtering is done by the script at the end of the document, so without
-       JavaScript this would be a box that swallows typing and never narrows anything. #}
-    <div class="search" role="search" hidden>
-      <input type="search" placeholder="Search skills by name…" aria-label="Search skills by name"
-             autocomplete="off" spellcheck="false">
-      <span class="search-status" role="status"></span>
+    <div class="toolbar">
+      {# Ships hidden: filtering is done by the script at the end of the document, so without
+         JavaScript this would be a box that swallows typing and never narrows anything. #}
+      <div class="search" role="search" hidden>
+        <input type="search" placeholder="Search skills by name…" aria-label="Search skills by name"
+               autocomplete="off" spellcheck="false">
+        <span class="search-status" role="status"></span>
+      </div>
+      {% if result.comparable %}
+        {# Same bargain as the search box, and disabled on top of it: one skill compares
+           with nothing, so the button only lights up once a second row is ticked. #}
+        <button type="button" class="compare-btn" hidden disabled>Compare similarity</button>
+      {% endif %}
     </div>
-    <table>
+    <table class="skills">
       <caption>Every SKILL.md found in the repository, ordered by path.</caption>
       <thead>
-        <tr><th scope="col">Name</th><th scope="col">File</th><th scope="col">Description</th></tr>
+        <tr>
+          {% if result.comparable %}
+            <th scope="col" class="pick">
+              <input type="checkbox" class="pick-all" aria-label="Select every skill shown">
+            </th>
+          {% endif %}
+          <th scope="col">Name</th><th scope="col">File</th><th scope="col">Description</th>
+        </tr>
       </thead>
       <tbody>
         {% for skill in result.skills %}
@@ -149,6 +246,15 @@
              here: Python and JavaScript disagree on a few non-ASCII letters, and the query
              and the haystack must be folded the same way to match. #}
           <tr data-name="{{ skill.name }}">
+            {% if result.comparable %}
+              {# The row's index into the scan, which is the row and column this skill
+                 occupies in the score triangle the compare section carries -- and where it
+                 lives, which is the only thing telling two copies of one name apart. #}
+              <td class="pick">
+                <input type="checkbox" data-index="{{ loop.index0 }}" data-dir="{{ skill.directory }}"
+                       aria-label="Compare {{ skill.name }}">
+              </td>
+            {% endif %}
             <td class="name">{{ skill.name }}</td>
             <td class="path mono">
               {% if url %}
@@ -170,12 +276,43 @@
           </tr>
         {% endfor %}
         <tr class="no-matches" hidden>
-          <td colspan="3">No skill name contains <b class="query"></b>.</td>
+          <td colspan="{{ 4 if result.comparable else 3 }}">No skill name contains <b class="query"></b>.</td>
         </tr>
       </tbody>
     </table>
   {% else %}
     <p class="empty">No skills found. Skill Atlas looks for <code>SKILL.md</code> files with YAML frontmatter.</p>
+  {% endif %}
+
+  {% if result.comparable %}
+    {# The scores travel in an attribute rather than in the script, because the template
+       autoescapes attributes and does not escape script bodies -- and a lower triangle of
+       whole percentages has nothing in it for escaping to touch on the way in.
+
+       Empty and hidden until the button is pressed: the grid is as large as the square of
+       the selection, so building it up front would mean tens of thousands of cells nobody
+       asked for. #}
+    <section class="compare" hidden data-scores="{{ result.matrix_json }}">
+      <div class="compare-head">
+        <h2>Similarity</h2>
+        <button type="button" class="compare-close">Hide</button>
+      </div>
+      <p class="hint">
+        Every pair among the skills you ticked, scored the way the groups below are. Darker is
+        more alike, and the cell says the number; the tint steps up at 45%, which is where a
+        pair starts counting as a near-duplicate.
+      </p>
+      <ul class="scale">
+        <li><span class="swatch"></span>under 10%</li>
+        <li><span class="swatch" data-heat="1"></span>10–24%</li>
+        <li><span class="swatch" data-heat="2"></span>25–44%</li>
+        <li><span class="swatch" data-heat="3"></span>45–69%</li>
+        <li><span class="swatch" data-heat="4"></span>70% and over</li>
+      </ul>
+      <div class="matrix-scroll">
+        <table class="matrix"></table>
+      </div>
+    </section>
   {% endif %}
 
   {% if result.similar %}
@@ -223,24 +360,153 @@
     const status = box.querySelector('.search-status');
     const noMatches = document.querySelector('.no-matches');
     const echo = noMatches.querySelector('.query');
+    const table = document.querySelector('table.skills');
     // Fold the names once, not on every keystroke: a large monorepo has hundreds of rows
     // and this runs while someone is still typing.
-    const rows = [...document.querySelectorAll('tbody tr[data-name]')]
-      .map(row => ({ row, name: row.dataset.name.toLowerCase() }));
+    const rows = [...table.querySelectorAll('tbody tr[data-name]')].map(row => {
+      const pick = row.querySelector('.pick input');
+      return {
+        row,
+        pick,
+        name: row.dataset.name,
+        folded: row.dataset.name.toLowerCase(),
+        // Which row and column of the score triangle this skill is, as the template
+        // numbered it -- not the position in this list, which a filter does not change
+        // but a future reordering of the table would.
+        index: pick ? Number(pick.dataset.index) : -1,
+        dir: pick ? pick.dataset.dir : '',
+      };
+    });
+
+    // Everything from here to `apply` is the comparison, which a report of fewer than two
+    // skills leaves out entirely -- so the search below must work with all of it missing.
+    const section = document.querySelector('.compare');
+    const button = document.querySelector('.compare-btn');
+    const pickAll = section && table.querySelector('.pick-all');
+    const scores = section && JSON.parse(section.dataset.scores);
+    // The triangle stores j < i only: the score does not depend on the order of the pair,
+    // and a skill compared with itself is the one answer that never had to be computed.
+    const score = (i, j) => (i === j ? 100 : i > j ? scores[i][j] : scores[j][i]);
+    // Where each tint takes over, matching the bands the legend spells out. Read off the
+    // scores real collections produce rather than picked for roundness: two skills sharing
+    // nothing still score a few percent, one family of skills on a topic reaches the high
+    // thirties, and the step at 45 is the threshold above which a pair is grouped at all.
+    const bands = [10, 25, 45, 70];
+    const heat = percent => bands.filter(edge => percent >= edge).length;
+    let showing = false;
+
+    const cell = (tag, text, className) => {
+      const node = document.createElement(tag);
+      node.textContent = text;  // as text: a skill name is not markup here either
+      if (className) node.className = className;
+      return node;
+    };
+
+    const draw = picked => {
+      // A name is not an identity here. The comparison people reach for first is a skill
+      // vendored twice, which puts two or three rows called `deploy` side by side -- so a
+      // name shared inside the selection gets its directory under it, and only then.
+      const tally = new Map();
+      for (const { name } of picked) tally.set(name, (tally.get(name) || 0) + 1);
+      const shared = name => tally.get(name) > 1;
+      const describe = row => (shared(row.name) ? `${row.name} (${row.dir})` : row.name);
+
+      const label = (row, className) => {
+        const th = cell('th', row.name, className);
+        th.scope = className === 'row' ? 'row' : 'col';
+        th.title = row.dir;
+        if (shared(row.name)) {
+          const where = document.createElement('small');
+          where.textContent = row.dir;
+          th.append(where);
+        }
+        return th;
+      };
+
+      const heading = document.createElement('tr');
+      heading.append(cell('th', ''));  // the corner, above the row names
+      for (const row of picked) heading.append(label(row, 'col'));
+      const head = document.createElement('thead');
+      head.append(heading);
+
+      const body = document.createElement('tbody');
+      for (const a of picked) {
+        const tr = document.createElement('tr');
+        tr.append(label(a, 'row'));
+        for (const b of picked) {
+          if (a === b) {
+            tr.append(cell('td', '—', 'self'));
+            continue;
+          }
+          const percent = score(a.index, b.index);
+          const td = cell('td', `${percent}%`);
+          td.dataset.heat = heat(percent);
+          // Both skills on the cell, not just in the headers: once the grid is wide enough
+          // to scroll, a cell in the middle of it is far from either label.
+          td.title = `${describe(a)} ↔ ${describe(b)}: ${percent}%`;
+          tr.append(td);
+        }
+        body.append(tr);
+      }
+      section.querySelector('.matrix').replaceChildren(head, body);
+    };
+
+    const syncPicks = () => {
+      if (!section) return;
+      const picked = rows.filter(({ pick }) => pick.checked);
+      button.disabled = picked.length < 2;
+      button.textContent = picked.length ? `Compare similarity (${picked.length})` : 'Compare similarity';
+
+      // The header checkbox speaks for the rows on screen, so a filtered-down table
+      // reports on its matches rather than on the ticks hidden behind the query.
+      const shown = rows.filter(({ row }) => !row.hidden);
+      pickAll.checked = shown.length > 0 && shown.every(({ pick }) => pick.checked);
+      pickAll.indeterminate = !pickAll.checked && shown.some(({ pick }) => pick.checked);
+
+      // A selection of one has nothing to compare, so the grid goes away -- but `showing`
+      // stays on, and ticking a second row brings it straight back rather than asking for
+      // the button again. Only Hide turns it off.
+      section.hidden = !(showing && picked.length > 1);
+      if (!section.hidden) draw(picked);
+    };
 
     const apply = () => {
       const typed = input.value.trim();
       const query = typed.toLowerCase();
       let shown = 0;
-      for (const { row, name } of rows) {
-        const hit = !query || name.includes(query);
+      for (const { row, folded } of rows) {
+        const hit = !query || folded.includes(query);
         row.hidden = !hit;
         if (hit) shown += 1;
       }
       echo.textContent = typed;  // as text, so a query is never read back as markup
       noMatches.hidden = shown > 0;
       status.textContent = query ? `${shown} of ${rows.length} match` : '';
+      syncPicks();
     };
+
+    if (section) {
+      table.addEventListener('change', event => {
+        if (event.target === pickAll) {
+          // Whatever is on screen: filter the table, then tick every match at once. A row
+          // the filter has hidden keeps the tick it already had, and stays in the grid --
+          // narrowing the list is not a way of dropping a skill from a comparison.
+          for (const { row, pick } of rows) if (!row.hidden) pick.checked = pickAll.checked;
+        }
+        syncPicks();
+      });
+      button.addEventListener('click', () => {
+        showing = true;
+        syncPicks();
+        section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+      section.querySelector('.compare-close').addEventListener('click', () => {
+        showing = false;
+        syncPicks();
+      });
+      table.classList.add('pickable');  // reveals the checkbox column
+      button.hidden = false;
+    }
 
     input.addEventListener('input', apply);
     input.addEventListener('keydown', event => {

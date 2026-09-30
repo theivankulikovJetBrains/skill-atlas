@@ -16,7 +16,7 @@ from .models import ScanResult
 from .report import format_console, write_html
 from .repo import RepoError, clone, web_base_url
 from .scanner import find_skills
-from .similarity import DEFAULT_THRESHOLD, find_similar
+from .similarity import DEFAULT_THRESHOLD, MAX_COMPARABLE, find_similar, pairwise
 
 DEFAULT_REPORT = "report.html"
 DEFAULT_PORT = 8888
@@ -229,7 +229,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument(
         "--no-similar",
         action="store_true",
-        help="do not group skills that look like near-duplicates",
+        help="do not compare skills: no near-duplicate groups, and no matrix in the report",
     )
     scan.add_argument(
         "--no-open",
@@ -245,6 +245,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     try:
         with clone(args.url, ref=args.ref) as checkout:
             skills = find_skills(checkout.path)
+            compare = not args.no_similar
             result = ScanResult(
                 source=args.url,
                 scanned_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
@@ -252,7 +253,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
                 commit=checkout.commit,
                 ref=checkout.ref,
                 web_base_url=web_base_url(args.url),
-                similar=[] if args.no_similar else find_similar(skills, args.similarity),
+                similar=find_similar(skills, args.similarity) if compare else [],
+                matrix=pairwise(skills) if compare and len(skills) <= MAX_COMPARABLE else [],
             )
     except RepoError as exc:
         print(f"skill-atlas: {exc}", file=sys.stderr)

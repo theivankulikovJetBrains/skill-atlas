@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 
 import pytest
 
 from skill_atlas.models import ScanResult, SimilarGroup, Skill
 from skill_atlas.report import format_console, write_html
+from skill_atlas.similarity import pairwise
 
 
 def result(*skills: Skill, **overrides) -> ScanResult:
@@ -143,6 +146,15 @@ class TestHtmlSearch:
         assert '<div class="search" role="search" hidden>' in html
         assert "box.hidden = false" in html  # ... and the script is what reveals it
 
+    def test_the_attribute_is_honoured_against_the_flex_layout(self, tmp_path: Path):
+        """`.search { display: flex }` outranks the browser's own rule for `[hidden]`.
+
+        Without this the box ships with an attribute that does nothing, and a reader with
+        no JavaScript gets the one control on the page that cannot work.
+        """
+        html = write_html(result(ALPHA), tmp_path / "r.html").read_text(encoding="utf-8")
+        assert ".search[hidden] { display: none; }" in html
+
     def test_the_filter_script_is_inline(self, tmp_path: Path):
         html = write_html(result(ALPHA), tmp_path / "r.html").read_text(encoding="utf-8")
         assert "<script>" in html
@@ -272,6 +284,121 @@ class TestSimilarGroups:
         """The search box narrows table rows; a group card must not be mistaken for one."""
         html = write_html(self.scan(self.GROUP), tmp_path / "r.html").read_text(encoding="utf-8")
         assert html.index("</table>") < html.index('<section class="similar">')
+
+
+class TestCompareMatrix:
+    """The pairwise comparison: checkboxes on the rows, and the scores to compare them with.
+
+    Drawing the grid is the browser's job and no browser runs here, so what is pinned is
+    the contract its script reads -- a checkbox per row carrying that row's index into the
+    score triangle, and the triangle itself, intact after the template escaped it.
+    """
+
+    def scan(self, *skills: Skill, **overrides) -> ScanResult:
+        return result(*skills, matrix=pairwise(skills), **overrides)
+
+    def render(self, tmp_path: Path, scan: ScanResult) -> str:
+        return write_html(scan, tmp_path / "r.html").read_text(encoding="utf-8")
+
+    def scores(self, html: str) -> list[list[int]]:
+        payload = re.search(r'<section class="compare" hidden data-scores="([^"]*)">', html)
+        assert payload, "the compare section did not carry a data-scores attribute"
+        return json.loads(payload.group(1))
+
+    def test_every_row_gets_a_checkbox_numbered_with_its_own_index(self, tmp_path: Path):
+        """The number on the box is the row's place in the triangle, so the pairing is the test."""
+        html = self.render(tmp_path, self.scan(ALPHA, BRAVO))
+        rows = re.findall(r'<tr data-name="([^"]*)">(.*?)</tr>', html, re.DOTALL)
+        assert [name for name, _ in rows] == ["alpha", "bravo"]
+        for index, (_, body) in enumerate(rows):
+            assert f'data-index="{index}"' in body
+
+    def test_the_header_offers_one_tick_for_every_row_shown(self, tmp_path: Path):
+        html = self.render(tmp_path, self.scan(ALPHA, BRAVO))
+        assert 'class="pick-all" aria-label="Select every skill shown"' in html
+
+    def test_a_checkbox_is_labelled_with_the_skill_it_compares(self, tmp_path: Path):
+        html = self.render(tmp_path, self.scan(ALPHA, BRAVO))
+        assert 'aria-label="Compare alpha"' in html
+
+    def test_every_checkbox_carries_where_its_skill_lives(self, tmp_path: Path):
+        """Two copies of one name are only told apart by directory, so the grid needs it."""
+        html = self.render(tmp_path, self.scan(AGENTS_COPY, CLAUDE_COPY))
+        assert 'data-dir=".agents/skills/deploy"' in html
+        assert 'data-dir=".claude/skills/deploy"' in html
+
+    def test_a_skill_at_the_repo_root_still_has_somewhere_to_point_at(self, tmp_path: Path):
+        html = self.render(tmp_path, self.scan(Skill("root", "d", "SKILL.md"), ALPHA))
+        assert 'data-dir="."' in html
+
+    def test_the_scores_survive_the_journey_into_the_attribute(self, tmp_path: Path):
+        """Whole percentages only, so nothing here is for HTML escaping to mangle."""
+        scan = self.scan(AGENTS_COPY, CLAUDE_COPY, ALPHA)
+        assert self.scores(self.render(tmp_path, scan)) == scan.matrix
+
+    def test_the_triangle_holds_the_pair_the_two_copies_make(self, tmp_path: Path):
+        scores = self.scores(self.render(tmp_path, self.scan(AGENTS_COPY, CLAUDE_COPY)))
+        assert scores == [[], [100]]
+
+    def test_the_column_and_the_button_ship_hidden_for_readers_without_javascript(self, tmp_path: Path):
+        html = self.render(tmp_path, self.scan(ALPHA, BRAVO))
+        assert '<button type="button" class="compare-btn" hidden disabled>' in html
+        # ... and the script is what reveals both
+        assert "button.hidden = false" in html
+        assert "table.classList.add('pickable')" in html
+
+    def test_the_grid_ships_empty_and_hidden(self, tmp_path: Path):
+        html = self.render(tmp_path, self.scan(ALPHA, BRAVO))
+        assert '<section class="compare" hidden' in html
+        assert '<table class="matrix"></table>' in html
+
+    def test_the_bands_are_spelled_out_beside_the_grid(self, tmp_path: Path):
+        """Colour never carries the ranking alone: there is a legend, and a number in every cell."""
+        html = self.render(tmp_path, self.scan(ALPHA, BRAVO))
+        assert 'class="scale"' in html
+        for band in ("under 10%", "10–24%", "25–44%", "45–69%", "70% and over"):
+            assert band in html
+        assert html.count("data-heat=") == 4 + 4  # four swatches, four tint rules
+
+    def test_the_empty_state_spans_the_extra_column(self, tmp_path: Path):
+        html = self.render(tmp_path, self.scan(ALPHA, BRAVO))
+        assert '<td colspan="4">No skill name contains' in html
+
+    def test_one_skill_has_nothing_to_compare(self, tmp_path: Path):
+        """pairwise() gives a lone skill one empty row, which is truthy and not a pair."""
+        scan = self.scan(ALPHA)
+        assert scan.matrix == [[]]
+        html = self.render(tmp_path, scan)
+        assert 'class="compare"' not in html
+        assert 'class="pick"' not in html
+        assert '<td colspan="3">No skill name contains' in html
+
+    def test_a_scan_that_skipped_the_comparison_shows_none_of_it(self, tmp_path: Path):
+        """--no-similar, or a collection past the cap: the skills table is untouched."""
+        html = self.render(tmp_path, result(ALPHA, BRAVO))
+        assert 'class="compare"' not in html
+        assert "data-scores" not in html
+        assert 'class="pick"' not in html
+        assert "alpha" in html and "bravo" in html
+
+    def test_a_name_cannot_break_out_of_its_checkbox_label(self, tmp_path: Path):
+        hostile = Skill('say "hi" & <b>run</b>', "d", "x/SKILL.md")
+        html = self.render(tmp_path, self.scan(hostile, ALPHA))
+        assert "<b>run</b>" not in html
+        assert 'say "hi"' not in html
+        assert "aria-label=" in html
+
+    def test_it_sits_between_the_table_and_the_groups(self, tmp_path: Path):
+        scan = self.scan(AGENTS_COPY, CLAUDE_COPY, similar=[SimilarGroup((AGENTS_COPY, CLAUDE_COPY), 1.0)])
+        html = self.render(tmp_path, scan)
+        assert html.index("</table>") < html.index('<section class="compare"')
+        assert html.index('<section class="compare"') < html.index('<section class="similar">')
+
+    def test_the_search_box_is_still_the_only_thing_that_filters(self, tmp_path: Path):
+        """Both controls act on one table, so the compare column must not disturb the rows."""
+        html = self.render(tmp_path, self.scan(ALPHA, BRAVO))
+        assert '<div class="search" role="search" hidden>' in html
+        assert html.count('<tr data-name=') == 2
 
 
 class TestUnusualPaths:
