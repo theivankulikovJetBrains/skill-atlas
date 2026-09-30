@@ -114,6 +114,22 @@ def find_browser(explicit: str | None) -> str | None:
     return None
 
 
+def tail(text: str, limit: int = 400) -> str:
+    """The last of a browser's chatter, on one line, short enough for an assertion message.
+
+    Chromium writes a good deal to stderr that means nothing (font and dbus warnings), and
+    the line that matters is the last one. Reversed rather than truncated from the front
+    for that reason.
+    """
+    lines = [line.strip() for line in (text or "").replace("\r", "").splitlines() if line.strip()]
+    kept: list[str] = []
+    for line in reversed(lines):
+        if sum(len(k) + 3 for k in kept) + len(line) > limit:
+            break
+        kept.insert(0, line)
+    return " | ".join(kept or lines[-1:])[:limit]
+
+
 def slug(text: str, cap: int) -> str:
     """A filename fragment: safe on Windows, and short enough to stay under MAX_PATH.
 
@@ -309,13 +325,21 @@ class Collector:
             staged.as_uri(),
         ]
         try:
-            subprocess.run(
+            done = subprocess.run(
                 argv, capture_output=True, text=True, errors="replace", timeout=RENDER_TIMEOUT
             )
         except (OSError, subprocess.TimeoutExpired) as bad:
             return self.give_up(f"{type(bad).__name__}: {bad}", staged)
         if not png.exists():
-            return self.give_up("the browser exited without writing a png", staged)
+            # Say what the browser said. Without this the message is "no png" and
+            # nothing else, which is what made the first CI failure of this job a
+            # guessing game: the reason was on a stderr that was being thrown away.
+            noise = tail(done.stderr) or tail(done.stdout)
+            return self.give_up(
+                f"the browser exited {done.returncode} without writing a png; "
+                + (f"it said: {noise}" if noise else "it said nothing"),
+                staged,
+            )
 
         if passed:
             staged.unlink(missing_ok=True)  # only a red check's markup is worth keeping
@@ -325,14 +349,24 @@ class Collector:
         return str(png)
 
     def sandbox_flags(self) -> tuple[str, ...]:
-        """``--no-sandbox``, but only as root, where the sandbox genuinely cannot work.
+        """``--no-sandbox`` on Linux, and as root anywhere.
 
-        Chromium refuses to start as root without it. Everywhere else -- a developer's
-        account, the ``agent`` user in this project's sandbox container, the ``runner``
-        user on GitHub -- the sandbox works and switching it off would be a pointless
-        loosening on the machine that browses the least trusted thing here.
+        Two separate reasons the sandbox cannot be set up, neither ours to fix. Chromium
+        refuses to start as root at all without this. And Ubuntu 23.10 and later -- which
+        is what the CI runner is -- restrict unprivileged user namespaces through AppArmor
+        (``kernel.apparmor_restrict_unprivileged_userns=1``), so the sandbox cannot be
+        built even as an ordinary user: the browser exits immediately, writes no
+        screenshot, and says so only on a stderr nobody was reading. That is precisely how
+        this job failed the first time it ran, 17 tests at once in 17 seconds.
+
+        Worth being clear about what is and is not being given up, because
+        ``--no-sandbox`` is otherwise a bad habit. The only document this browser ever
+        loads is one the suite generated itself a moment earlier, from a local fixture,
+        with no external assets (``test_is_a_standalone_document`` pins that) and nothing
+        from the network in it. There is no untrusted content here for a sandbox to
+        contain. A browser you actually browse with is a different question entirely.
         """
-        if sys.platform != "win32" and getattr(os, "geteuid", lambda: 1)() == 0:
+        if sys.platform.startswith("linux") or getattr(os, "geteuid", lambda: 1)() == 0:
             return ("--no-sandbox",)
         return ()
 
