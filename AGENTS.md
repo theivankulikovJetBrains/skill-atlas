@@ -16,6 +16,7 @@ Nothing is installed globally; everything runs through `uv` (Python ≥3.14, `gi
 | Install / sync deps | `uv sync --locked` |
 | Tests | `uv run pytest` |
 | One test file or case | `uv run pytest tests/test_scanner.py -k frontmatter` |
+| Tests, photographing the report at each check | `uv run pytest --shots` |
 | Run the CLI | `uv run skill-atlas scan <git repo url>` |
 | Run every scenario and film it | `python .claude/skills/demo-video/scripts/record_demo.py` |
 | Build sdist + wheel | `uv build` |
@@ -106,6 +107,7 @@ src/skill_atlas/
   models.py                  Skill, SimilarGroup and ScanResult dataclasses
   templates/report.html.j2   the HTML report (Jinja2, packaged as data)
 tests/                       one test module per source module; conftest.py has make_repo
+tests/shots.py               screenshot collection: a frame per check made on the report
 spec/cli.md                  the behaviour contract
 scripts/sbx-feature.sh       one worktree + one sandbox per feature (host tooling, not shipped)
 .claude/skills/demo-video/   runs every scenario in spec/cli.md and films it (host tooling too)
@@ -165,6 +167,46 @@ Follow what the existing modules already do rather than importing a new style:
 - Both platforms matter: CI runs Linux, Windows and macOS. Watch for path separators
   (repo-relative paths are always POSIX-style), file locking on Windows, and console
   encoding — see `_harden_stdio` in `cli.py`.
+
+### Screenshots of the checks
+
+`uv run pytest --shots` photographs the report at every check made against it, into a
+gitignored `test-shots/` (`index.md` there lists each check, its verdict and its frame).
+CI does the same in its own `report screenshots` job and uploads the result, so a red
+check on a pull request comes with the picture that shows why. `tests/shots.py` explains
+the mechanism; what matters when writing tests:
+
+- **It is off unless asked for.** A plain `uv run pytest` starts no browser, and
+  `page.check(...)` is then a bare `assert`. That is deliberate — the suite's promise to
+  finish in seconds is worth more than always having the frames — so write report tests
+  with `shots` freely; they cost a default run nothing.
+- **The markup decides, never the picture.** Nothing is compared against a baseline
+  image: fonts differ per runner, and these frames are evidence for a human reading a CI
+  artifact. A check's verdict comes from the condition the test computed, exactly as
+  before. A browser that will not start cannot fail a check that would otherwise pass —
+  `--shots-strict` is how CI asks for the opposite, so a green run cannot ship an empty
+  artifact.
+- **Ask for a frame only where it is evidence.** A picture is worth a launch for a check
+  about something a reader can see — that a hostile name is drawn as text, that the
+  search box really is absent without JavaScript, that odd characters are glyphs and not
+  mojibake. For a check on a script's source text or a `data-` attribute it is a second
+  photograph of the same page; leave those as plain asserts.
+- **`no_script=True` is not a way to simplify a picture.** It is the document a reader
+  without JavaScript actually gets, and the only honest subject for the checks about what
+  ships hidden: rendered as shipped, the report's own script reveals those elements
+  before the shutter opens and the frame would contradict the check beside it.
+- Spell the directory override `--shots-dir=PATH`, with the equals sign. pytest cannot
+  know that flag takes a value until a conftest has loaded, so a separate argument that
+  happens to be an existing directory is taken for a test path — which moves rootdir and
+  then loads no conftest at all, and the flag comes back "unrecognized". Each flag has an
+  environment variable behind it (`SKILL_ATLAS_SHOTS`, `SKILL_ATLAS_SHOTS_DIR`,
+  `SKILL_ATLAS_SHOTS_STRICT`, `SKILL_ATLAS_SHOTS_BROWSER`) which has no such problem;
+  that is what the CI job uses.
+- This does not replace the `demo-video` skill, and the two do not overlap. These frames
+  are of static documents and answer "does the report draw what the check says it
+  contains". Whether the report's *JavaScript* works — typing in the search box, ticking
+  rows, the matrix — is still that skill's question, and a new claim about behaviour
+  belongs in its `ui_steps()`, not here.
 
 ## Definition of Done
 
@@ -247,8 +289,8 @@ Follow what the existing modules already do rather than importing a new style:
 
 ## Gotchas
 
-- The root `.gitignore` covers generated output: `report.html`, `/demo-run/`, `__pycache__/`,
-  `*.py[cod]`, `dist/`, `.venv/` and `.pytest_cache/`. The bare `report.html` pattern matches
+- The root `.gitignore` covers generated output: `report.html`, `/demo-run/`, `/test-shots/`,
+  `__pycache__/`, `*.py[cod]`, `dist/`, `.venv/` and `.pytest_cache/`. The bare `report.html` pattern matches
   at any depth, so generated reports left inside the package directory are ignored too. The
   template is `templates/report.html.j2` and is *not* matched — gitignore patterns match
   full names, not prefixes. `/demo-run/` is anchored because it is one specific directory at

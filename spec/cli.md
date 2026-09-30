@@ -62,4 +62,4 @@ Shallow, blobless, no working tree; then only `SKILL.md` files are materialised,
 Python ≥3.14 and `git` on PATH. Credential prompts are disabled, so private repos need ambient auth such as a credential helper.
 
 ## CI
-GitHub Actions, on push to `main` and every PR: `uv sync --locked` then `pytest`, on Linux/Windows/macOS. A second job builds the wheel and scans this repository through it — offline, and the only check that catches a packaged data file going missing.
+GitHub Actions, on push to `main` and every PR: `uv sync --locked` then `pytest`, on Linux/Windows/macOS. A second job builds the wheel and scans this repository through it — offline, and the only check that catches a packaged data file going missing. A third runs the suite once more on Linux with a headless browser photographing the report at each check made against it, and uploads the frames as an artifact whether the run passed or failed, so a red check comes with the picture that shows why. Collection is off in a plain `pytest`; the verdict comes from the markup either way, and no frame is compared against a baseline image.

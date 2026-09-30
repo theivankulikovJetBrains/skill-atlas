@@ -53,13 +53,15 @@ class TestScanCommand:
         assert "alpha" in out
         assert ".claude/skills/alpha/SKILL.md" in out
 
-    def test_writes_report_html_to_the_working_directory(self, fake_clone, in_tmp_cwd, capsys):
+    def test_writes_report_html_to_the_working_directory(self, fake_clone, in_tmp_cwd, capsys, shots):
         fake_clone()
         cli.main(["scan", URL])
         report = in_tmp_cwd / "report.html"
         assert report.is_file()
-        assert "alpha" in report.read_text(encoding="utf-8")
-        assert str(report.resolve()) in capsys.readouterr().out
+        printed = capsys.readouterr().out
+        page = shots.page(report)
+        page.check("the scanned skill is in the report", "alpha" in page.html)
+        page.check("and the path it went to was printed", str(report.resolve()) in printed)
 
     def test_out_flag_overrides_the_destination(self, fake_clone, in_tmp_cwd):
         fake_clone()
@@ -83,7 +85,7 @@ class TestScanCommand:
         assert "No skills found" in capsys.readouterr().out
         assert (in_tmp_cwd / "report.html").is_file()
 
-    def test_duplicated_skills_reach_both_outputs(self, fake_clone, in_tmp_cwd, capsys):
+    def test_duplicated_skills_reach_both_outputs(self, fake_clone, in_tmp_cwd, capsys, shots):
         """A repo keeping one skill under .agents/ and .claude/ reports both copies."""
         fake_clone(
             {
@@ -95,18 +97,21 @@ class TestScanCommand:
 
         out = capsys.readouterr().out
         assert "Found 2 skills:" in out
-        html = (in_tmp_cwd / "report.html").read_text(encoding="utf-8")
+        page = shots.page(in_tmp_cwd / "report.html")
         for path in (".agents/skills/deploy/SKILL.md", ".claude/skills/deploy/SKILL.md"):
             assert path in out
-            assert path in html
+            page.check(f"the report keeps the copy at {path}", path in page.html)
 
-    def test_a_skill_in_an_odd_directory_survives_the_whole_pipeline(self, fake_clone, in_tmp_cwd, capsys):
+    def test_a_skill_in_an_odd_directory_survives_the_whole_pipeline(
+        self, fake_clone, in_tmp_cwd, capsys, shots
+    ):
         fake_clone({"my skills/café (v2)/SKILL.md": skill_md("odd", "Lives somewhere strange.")})
         assert cli.main(["scan", URL]) == 0
 
         assert "my skills/café (v2)/SKILL.md" in nfc(capsys.readouterr().out)
-        html = nfc((in_tmp_cwd / "report.html").read_text(encoding="utf-8"))
-        assert "my skills/café (v2)/SKILL.md" in html
+        page = shots.page(in_tmp_cwd / "report.html")
+        page.check("the odd path came through the whole pipeline",
+                   "my skills/café (v2)/SKILL.md" in nfc(page.html))
 
     def test_report_can_be_written_into_an_odd_directory(self, fake_clone, in_tmp_cwd):
         fake_clone()
@@ -336,7 +341,7 @@ TWINS = {
 
 
 class TestSimilarityFlags:
-    def test_near_duplicates_are_grouped_by_default(self, fake_clone, in_tmp_cwd, capsys):
+    def test_near_duplicates_are_grouped_by_default(self, fake_clone, in_tmp_cwd, capsys, shots):
         fake_clone(TWINS)
         assert cli.main(["scan", URL]) == 0
 
@@ -344,7 +349,8 @@ class TestSimilarityFlags:
         assert "Found 3 skills:" in out
         assert "Similar skills (1 group;" in out
         assert "  100%  deploy" in out
-        assert "Similar groups <b>1</b>" in (in_tmp_cwd / "report.html").read_text(encoding="utf-8")
+        page = shots.page(in_tmp_cwd / "report.html")
+        page.check("the report counts the group too", "Similar groups <b>1</b>" in page.html)
 
     def test_the_odd_one_out_is_not_dragged_in(self, fake_clone, capsys):
         fake_clone(TWINS)
@@ -577,7 +583,9 @@ class TestStdioHardening:
         monkeypatch.setattr(sys, "stdout", object())
         cli._harden_stdio()  # must not raise
 
-    def test_unencodable_description_does_not_lose_the_report(self, fake_clone, in_tmp_cwd, monkeypatch):
+    def test_unencodable_description_does_not_lose_the_report(
+        self, fake_clone, in_tmp_cwd, monkeypatch, shots
+    ):
         fake_clone({"skills/awkward/SKILL.md": f"---\nname: awkward\ndescription: {AWKWARD}\n---\n"})
         monkeypatch.setattr(sys, "stdout", cp1252_stream())
 
@@ -585,7 +593,10 @@ class TestStdioHardening:
 
         report = in_tmp_cwd / "report.html"
         assert report.is_file()
-        assert AWKWARD in report.read_text(encoding="utf-8")
+        # The console had to drop these characters to stay writable; the frame is where
+        # you see that the report did not, and that they are glyphs rather than mojibake.
+        page = shots.page(report)
+        page.check("the report kept the text the console could not print", AWKWARD in page.html)
 
 
 class TestArgumentParsing:

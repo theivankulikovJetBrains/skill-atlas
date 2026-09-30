@@ -76,17 +76,17 @@ class TestHtmlReport:
         write_html(result(ALPHA), target)
         assert "stale" not in target.read_text(encoding="utf-8")
 
-    def test_includes_every_skill(self, tmp_path: Path):
-        html = write_html(result(ALPHA, BRAVO), tmp_path / "r.html").read_text(encoding="utf-8")
-        assert "alpha" in html
-        assert "bravo" in html
-        assert "Formats things." in html
-        assert "Skills found" in html
+    def test_includes_every_skill(self, tmp_path: Path, shots):
+        page = shots.page(write_html(result(ALPHA, BRAVO), tmp_path / "r.html"))
+        page.check("alpha is listed", "alpha" in page.html)
+        page.check("bravo is listed too", "bravo" in page.html)
+        page.check("a description is shown beside it", "Formats things." in page.html)
+        page.check("the table is headed", "Skills found" in page.html)
 
-    def test_links_skill_files_to_the_host(self, tmp_path: Path):
-        html = write_html(result(ALPHA), tmp_path / "r.html").read_text(encoding="utf-8")
+    def test_links_skill_files_to_the_host(self, tmp_path: Path, shots):
+        page = shots.page(write_html(result(ALPHA), tmp_path / "r.html"))
         expected = f'href="https://github.com/acme/widgets/blob/{"a" * 40}/.claude/skills/alpha/SKILL.md"'
-        assert expected in html
+        page.check("the path is a link to the file on the host", expected in page.html)
 
     def test_omits_links_for_unknown_hosts(self, tmp_path: Path):
         scan = result(ALPHA, web_base_url=None)
@@ -101,25 +101,28 @@ class TestHtmlReport:
             ("description", "Uses <b>bold</b> & \"quotes\" 'here'"),
         ],
     )
-    def test_skill_metadata_is_html_escaped(self, tmp_path: Path, field: str, payload: str):
+    def test_skill_metadata_is_html_escaped(self, tmp_path: Path, field: str, payload: str, shots):
         skill = Skill(
             name=payload if field == "name" else "safe",
             description=payload if field == "description" else "safe",
             path="SKILL.md",
         )
-        html = write_html(result(skill), tmp_path / "r.html").read_text(encoding="utf-8")
-        assert payload not in html
-        assert "&lt;" in html or "&amp;" in html
+        page = shots.page(write_html(result(skill), tmp_path / "r.html"))
+        # The frame is worth more than usual here: it shows the payload sitting in the
+        # table as text. A page that executed it instead looks identical in the markup
+        # these two checks read, and nothing like it once drawn.
+        page.check(f"the {field} is not in the document verbatim", payload not in page.html)
+        page.check("it was escaped on the way in", "&lt;" in page.html or "&amp;" in page.html)
 
     def test_source_url_is_escaped(self, tmp_path: Path):
         scan = result(ALPHA, source='https://evil/"><script>x</script>', web_base_url=None)
         html = write_html(scan, tmp_path / "r.html").read_text(encoding="utf-8")
         assert "<script>x</script>" not in html
 
-    def test_empty_scan_renders_a_placeholder(self, tmp_path: Path):
-        html = write_html(result(), tmp_path / "r.html").read_text(encoding="utf-8")
-        assert "No skills found" in html
-        assert "<table" not in html
+    def test_empty_scan_renders_a_placeholder(self, tmp_path: Path, shots):
+        page = shots.page(write_html(result(), tmp_path / "r.html"))
+        page.check("it says nothing was found", "No skills found" in page.html)
+        page.check("and offers no empty table", "<table" not in page.html)
 
     def test_is_a_standalone_document(self, tmp_path: Path):
         html = write_html(result(ALPHA), tmp_path / "r.html").read_text(encoding="utf-8")
@@ -141,19 +144,29 @@ class TestHtmlSearch:
         assert 'type="search"' in html
         assert 'aria-label="Search skills by name"' in html
 
-    def test_the_box_ships_hidden_for_readers_without_javascript(self, tmp_path: Path):
-        html = write_html(result(ALPHA), tmp_path / "r.html").read_text(encoding="utf-8")
-        assert '<div class="search" role="search" hidden>' in html
-        assert "box.hidden = false" in html  # ... and the script is what reveals it
+    def test_the_box_ships_hidden_for_readers_without_javascript(self, tmp_path: Path, shots):
+        report = write_html(result(ALPHA), tmp_path / "r.html")
+        # Two pages, on purpose. The first check is about the document a reader without
+        # JavaScript gets, so its frame is taken from a copy with the script stripped --
+        # rendered as shipped, the report's own script reveals the box before the shutter
+        # opens and the picture would contradict the check beside it. The second check is
+        # about that script, so its frame is the shipped document, box and all.
+        bare = shots.page(report, no_script=True)
+        bare.check("the box ships hidden", '<div class="search" role="search" hidden>' in bare.html)
+        shipped = shots.page(report)
+        shipped.check("and the script is what reveals it", "box.hidden = false" in shipped.html)
 
-    def test_the_attribute_is_honoured_against_the_flex_layout(self, tmp_path: Path):
+    def test_the_attribute_is_honoured_against_the_flex_layout(self, tmp_path: Path, shots):
         """`.search { display: flex }` outranks the browser's own rule for `[hidden]`.
 
         Without this the box ships with an attribute that does nothing, and a reader with
-        no JavaScript gets the one control on the page that cannot work.
+        no JavaScript gets the one control on the page that cannot work. The frame is the
+        point of this one: the bug it guards against is invisible in the markup and
+        obvious in the picture.
         """
-        html = write_html(result(ALPHA), tmp_path / "r.html").read_text(encoding="utf-8")
-        assert ".search[hidden] { display: none; }" in html
+        page = shots.page(write_html(result(ALPHA), tmp_path / "r.html"), no_script=True)
+        page.check("the rule that makes hidden stick is there",
+                   ".search[hidden] { display: none; }" in page.html)
 
     def test_the_filter_script_is_inline(self, tmp_path: Path):
         html = write_html(result(ALPHA), tmp_path / "r.html").read_text(encoding="utf-8")
@@ -200,10 +213,10 @@ class TestDuplicateSkills:
         assert lines.index("    .claude/skills/deploy/SKILL.md") < flagged
         assert lines.index("    .agents/skills/deploy/SKILL.md") < lines.index("    From .agents.")
 
-    def test_html_renders_one_row_per_copy(self, tmp_path: Path):
-        html = write_html(result(AGENTS_COPY, CLAUDE_COPY), tmp_path / "r.html").read_text(encoding="utf-8")
-        assert html.count('class="name"') == 2
-        assert "Skills found <b>2</b>" in html
+    def test_html_renders_one_row_per_copy(self, tmp_path: Path, shots):
+        page = shots.page(write_html(result(AGENTS_COPY, CLAUDE_COPY), tmp_path / "r.html"))
+        page.check("one row per copy", page.html.count('class="name"') == 2)
+        page.check("and the count agrees", "Skills found <b>2</b>" in page.html)
 
     def test_each_copy_links_to_its_own_file(self, tmp_path: Path):
         html = write_html(result(AGENTS_COPY, CLAUDE_COPY), tmp_path / "r.html").read_text(encoding="utf-8")
@@ -252,11 +265,11 @@ class TestSimilarGroups:
         assert 'class="similar"' not in html
         assert "Similar groups" not in html
 
-    def test_html_renders_a_card_per_group_with_its_score(self, tmp_path: Path):
-        html = write_html(self.scan(self.GROUP, self.LOOSER), tmp_path / "r.html").read_text(encoding="utf-8")
-        assert html.count('<div class="group">') == 2
-        assert '<div class="score">100%</div>' in html
-        assert '<div class="score">72%</div>' in html
+    def test_html_renders_a_card_per_group_with_its_score(self, tmp_path: Path, shots):
+        page = shots.page(write_html(self.scan(self.GROUP, self.LOOSER), tmp_path / "r.html"))
+        page.check("a card per group", page.html.count('<div class="group">') == 2)
+        page.check("the vendored copy scores 100%", '<div class="score">100%</div>' in page.html)
+        page.check("the looser pair scores 72%", '<div class="score">72%</div>' in page.html)
 
     def test_html_counts_the_groups_in_the_summary_bar(self, tmp_path: Path):
         html = write_html(self.scan(self.GROUP, self.LOOSER), tmp_path / "r.html").read_text(encoding="utf-8")
@@ -340,12 +353,19 @@ class TestCompareMatrix:
         scores = self.scores(self.render(tmp_path, self.scan(AGENTS_COPY, CLAUDE_COPY)))
         assert scores == [[], [100]]
 
-    def test_the_column_and_the_button_ship_hidden_for_readers_without_javascript(self, tmp_path: Path):
-        html = self.render(tmp_path, self.scan(ALPHA, BRAVO))
-        assert '<button type="button" class="compare-btn" hidden disabled>' in html
-        # ... and the script is what reveals both
-        assert "button.hidden = false" in html
-        assert "table.classList.add('pickable')" in html
+    def test_the_column_and_the_button_ship_hidden_for_readers_without_javascript(
+        self, tmp_path: Path, shots
+    ):
+        report = write_html(self.scan(ALPHA, BRAVO), tmp_path / "r.html")
+        # Split the same way the search box's twin is: the shipped-hidden check is
+        # photographed without the script, the checks about the script with it.
+        bare = shots.page(report, no_script=True)
+        bare.check("the button ships hidden and disabled",
+                   '<button type="button" class="compare-btn" hidden disabled>' in bare.html)
+        shipped = shots.page(report)
+        shipped.check("the script reveals the button", "button.hidden = false" in shipped.html)
+        shipped.check("and the checkbox column with it",
+                      "table.classList.add('pickable')" in shipped.html)
 
     def test_the_grid_ships_empty_and_hidden(self, tmp_path: Path):
         html = self.render(tmp_path, self.scan(ALPHA, BRAVO))
@@ -406,10 +426,12 @@ class TestUnusualPaths:
         skill = Skill("odd", "Strange home.", "my skills/café (v2)/SKILL.md")
         assert "my skills/café (v2)/SKILL.md" in format_console(result(skill))
 
-    def test_an_odd_path_is_still_linked(self, tmp_path: Path):
+    def test_an_odd_path_is_still_linked(self, tmp_path: Path, shots):
         skill = Skill("odd", "Strange home.", "my skills/café/SKILL.md")
-        html = write_html(result(skill), tmp_path / "r.html").read_text(encoding="utf-8")
-        assert f'/blob/{"a" * 40}/my skills/café/SKILL.md"' in html
+        page = shots.page(write_html(result(skill), tmp_path / "r.html"))
+        # The frame also catches the other way this goes wrong: a path that is linked
+        # correctly and drawn as mojibake.
+        page.check("the odd path is linked", f'/blob/{"a" * 40}/my skills/café/SKILL.md"' in page.html)
 
     def test_a_path_cannot_break_out_of_the_href_attribute(self, tmp_path: Path):
         """Directory names may legally contain quotes and ampersands on POSIX."""
@@ -419,7 +441,8 @@ class TestUnusualPaths:
         assert "&amp; co" in html
         assert "&#34;" in html or "&quot;" in html
 
-    def test_an_issue_names_the_file_even_for_an_odd_path(self, tmp_path: Path):
+    def test_an_issue_names_the_file_even_for_an_odd_path(self, tmp_path: Path, shots):
         skill = Skill("odd", "", "my skills/café/Skill.md", ("has no YAML frontmatter",))
-        html = write_html(result(skill), tmp_path / "r.html").read_text(encoding="utf-8")
-        assert "Skill.md has no YAML frontmatter" in html
+        page = shots.page(write_html(result(skill), tmp_path / "r.html"))
+        page.check("the issue names the file it is about",
+                   "Skill.md has no YAML frontmatter" in page.html)

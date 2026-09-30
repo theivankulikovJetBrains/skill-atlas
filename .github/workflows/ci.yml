@@ -32,6 +32,51 @@ jobs:
       - name: Run tests
         run: uv run pytest
 
+  # The same suite again, on one OS, with a browser photographing the report at every
+  # check made against it. Separate from `test` on purpose: that job is three OSes of
+  # markup assertions that finish in seconds, and collection needs a browser and about
+  # a minute. A red check fails this job exactly as it fails that one -- the artifact is
+  # evidence, not a substitute for the verdict. See tests/shots.py.
+  screenshots:
+    name: report screenshots
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install project
+        run: uv sync --locked
+
+      - name: Run the suite and photograph every report check
+        env:
+          # Through the environment rather than --shots-dir: pytest cannot know that flag
+          # takes a value until a conftest has loaded, so a value that happens to be an
+          # existing directory is read as a test path instead -- which moves rootdir and
+          # then loads no conftest at all. RUNNER_TEMP is outside the checkout, so nothing
+          # collected here can reach `git status`.
+          SKILL_ATLAS_SHOTS_DIR: ${{ runner.temp }}/shots
+          # Microsoft Edge ships with the runner image, so a browser that cannot be found
+          # or cannot render is a broken job rather than a machine that could not oblige.
+          # Without this the capture would skip itself and the upload below would succeed
+          # with an empty directory, under a green tick.
+          SKILL_ATLAS_SHOTS_STRICT: "1"
+        run: uv run pytest
+
+      # always(): a red check is the one case where these pictures are worth looking at,
+      # and the frame that failed is the last one collected. if-no-files-found is left at
+      # its default warning -- the run is already failed by the step above when nothing
+      # was photographed, and erroring here too would only bury that.
+      - name: Upload the screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-screenshots
+          path: ${{ runner.temp }}/shots
+
   package:
     name: package and smoke test
     runs-on: ubuntu-latest
