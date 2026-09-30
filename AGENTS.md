@@ -81,15 +81,16 @@ src/skill_atlas/
   cli.py                     argparse wiring, exit codes, the report server and open policy
   repo.py                    clone(): shallow/blobless/sparse fetch into a temp dir
   scanner.py                 find_skills(): walk a tree, parse SKILL.md frontmatter
+  similarity.py              find_similar(): cluster skills that read as near-duplicates
   report.py                  format_console() and write_html()
-  models.py                  Skill and ScanResult dataclasses
+  models.py                  Skill, SimilarGroup and ScanResult dataclasses
   templates/report.html.j2   the HTML report (Jinja2, packaged as data)
 tests/                       one test module per source module; conftest.py has make_repo
 spec/cli.md                  the behaviour contract
 scripts/sbx-feature.sh       one worktree + one sandbox per feature (host tooling, not shipped)
 ```
 
-Data flows one way: `repo` → `scanner` → `models` → `report` → `cli`. Keep it that way;
+Data flows one way: `repo` → `scanner` → `similarity` → `models` → `report` → `cli`. Keep it that way;
 nothing below `cli.py` should print, and nothing should reach the network outside `repo.py` —
 the report server in `cli.py` binds `127.0.0.1` and serves one in-memory document.
 

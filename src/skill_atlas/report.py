@@ -49,6 +49,31 @@ def _console_lines(result: ScanResult) -> Iterator[str]:
         for issue in skill.issues:
             yield f"    ! {issue}"
 
+    yield from _similar_lines(result)
+
+
+def _similar_lines(result: ScanResult) -> Iterator[str]:
+    """The near-duplicate groups, after the full list rather than folded into it.
+
+    Every skill stays listed above on its own, because a group is a suggestion to go
+    and look, not a verdict that one of the copies is redundant.
+    """
+    if not result.similar:
+        return
+
+    noun = "group" if result.similar_count == 1 else "groups"
+    yield ""
+    # Say what the number measures. A group can be reached through a chain, so its
+    # weakest member may resemble the rest far less than the headline percentage --
+    # which reads as a claim about every line under it unless it is qualified.
+    yield f"Similar skills ({result.similar_count} {noun}; % is the strongest pair in the group):"
+    for group in result.similar:
+        yield ""
+        # Percent right-aligned to three digits so 100% and 87% share a column.
+        yield f"  {group.percent:>3}%  {', '.join(group.names)}"
+        for skill in group.skills:
+            yield f"        {skill.path}"
+
 
 def write_html(result: ScanResult, destination: str | Path) -> Path:
     """Write ``report.html`` for ``result`` and return the path written."""

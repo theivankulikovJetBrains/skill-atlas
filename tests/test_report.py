@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from skill_atlas.models import ScanResult, Skill
+from skill_atlas.models import ScanResult, SimilarGroup, Skill
 from skill_atlas.report import format_console, write_html
 
 
@@ -197,6 +197,81 @@ class TestDuplicateSkills:
         html = write_html(result(AGENTS_COPY, CLAUDE_COPY), tmp_path / "r.html").read_text(encoding="utf-8")
         for skill in (AGENTS_COPY, CLAUDE_COPY):
             assert f'href="https://github.com/acme/widgets/blob/{"a" * 40}/{skill.path}"' in html
+
+
+class TestSimilarGroups:
+    """The near-duplicate section. Grouping itself is tested in test_similarity.py."""
+
+    GROUP = SimilarGroup((AGENTS_COPY, CLAUDE_COPY), 1.0)
+    LOOSER = SimilarGroup((ALPHA, Skill("alpha-2", "Formats things too.", "skills/alpha-2/SKILL.md")), 0.72)
+
+    def scan(self, *groups: SimilarGroup) -> ScanResult:
+        skills = [skill for group in groups for skill in group.skills]
+        return result(*skills, similar=list(groups))
+
+    def test_console_omits_the_section_when_nothing_resembles_anything(self):
+        assert "Similar" not in format_console(result(ALPHA, BRAVO))
+
+    def test_console_heads_the_section_with_the_group_count(self):
+        assert "Similar skills (1 group;" in format_console(self.scan(self.GROUP))
+        assert "Similar skills (2 groups;" in format_console(self.scan(self.GROUP, self.LOOSER))
+
+    def test_console_says_what_the_percentage_measures(self):
+        """A chained group's weakest member resembles the rest less than the headline."""
+        assert "% is the strongest pair in the group" in format_console(self.scan(self.GROUP))
+
+    def test_console_shows_the_score_and_every_member_path(self):
+        text = format_console(self.scan(self.GROUP))
+        assert "  100%  deploy" in text
+        assert "        .agents/skills/deploy/SKILL.md" in text
+        assert "        .claude/skills/deploy/SKILL.md" in text
+
+    def test_console_names_each_distinct_skill_in_the_group(self):
+        assert "   72%  alpha, alpha-2" in format_console(self.scan(self.LOOSER))
+
+    def test_console_still_lists_every_member_in_the_full_list(self):
+        """A group is a pointer, not a replacement -- the copies stay individually visible."""
+        text = format_console(self.scan(self.GROUP))
+        assert text.index("Found 2 skills:") < text.index("Similar skills")
+        assert text.count(".agents/skills/deploy/SKILL.md") == 2  # once in each section
+
+    def test_html_omits_the_section_when_nothing_resembles_anything(self, tmp_path: Path):
+        html = write_html(result(ALPHA, BRAVO), tmp_path / "r.html").read_text(encoding="utf-8")
+        assert 'class="similar"' not in html
+        assert "Similar groups" not in html
+
+    def test_html_renders_a_card_per_group_with_its_score(self, tmp_path: Path):
+        html = write_html(self.scan(self.GROUP, self.LOOSER), tmp_path / "r.html").read_text(encoding="utf-8")
+        assert html.count('<div class="group">') == 2
+        assert '<div class="score">100%</div>' in html
+        assert '<div class="score">72%</div>' in html
+
+    def test_html_counts_the_groups_in_the_summary_bar(self, tmp_path: Path):
+        html = write_html(self.scan(self.GROUP, self.LOOSER), tmp_path / "r.html").read_text(encoding="utf-8")
+        assert "Similar groups <b>2</b>" in html
+
+    def test_html_links_each_member_to_its_own_file(self, tmp_path: Path):
+        html = write_html(self.scan(self.GROUP), tmp_path / "r.html").read_text(encoding="utf-8")
+        for skill in self.GROUP.skills:
+            assert f'href="https://github.com/acme/widgets/blob/{"a" * 40}/{skill.path}"' in html
+
+    def test_html_leaves_the_paths_plain_for_an_unknown_host(self, tmp_path: Path):
+        scan = result(*self.GROUP.skills, similar=[self.GROUP], web_base_url=None)
+        html = write_html(scan, tmp_path / "r.html").read_text(encoding="utf-8")
+        assert "/blob/" not in html
+        assert 'class="similar"' in html
+
+    def test_html_escapes_a_members_name(self, tmp_path: Path):
+        hostile = Skill("<script>alert(1)</script>", "d", "x/SKILL.md")
+        group = SimilarGroup((hostile, Skill("safe", "d", "y/SKILL.md")), 0.9)
+        html = write_html(self.scan(group), tmp_path / "r.html").read_text(encoding="utf-8")
+        assert "<script>alert(1)</script>" not in html
+        assert "&lt;script&gt;" in html
+
+    def test_the_section_sits_outside_the_searchable_table(self, tmp_path: Path):
+        """The search box narrows table rows; a group card must not be mistaken for one."""
+        html = write_html(self.scan(self.GROUP), tmp_path / "r.html").read_text(encoding="utf-8")
+        assert html.index("</table>") < html.index('<section class="similar">')
 
 
 class TestUnusualPaths:

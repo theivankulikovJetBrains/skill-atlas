@@ -335,6 +335,80 @@ class TestPortFlag:
         assert (in_tmp_cwd / "report.html").is_file()
 
 
+#: A pair the default threshold groups, and a third skill it leaves alone.
+TWINS = {
+    ".agents/skills/deploy/SKILL.md": skill_md("deploy", "Deploy the service to production."),
+    ".claude/skills/deploy/SKILL.md": skill_md("deploy", "Deploy the service to production."),
+    "skills/resize/SKILL.md": skill_md("resize", "Shrinks an image to fit a box."),
+}
+
+
+class TestSimilarityFlags:
+    def test_near_duplicates_are_grouped_by_default(self, fake_clone, in_tmp_cwd, capsys):
+        fake_clone(TWINS)
+        assert cli.main(["scan", URL]) == 0
+
+        out = capsys.readouterr().out
+        assert "Found 3 skills:" in out
+        assert "Similar skills (1 group;" in out
+        assert "  100%  deploy" in out
+        assert "Similar groups <b>1</b>" in (in_tmp_cwd / "report.html").read_text(encoding="utf-8")
+
+    def test_the_odd_one_out_is_not_dragged_in(self, fake_clone, capsys):
+        fake_clone(TWINS)
+        cli.main(["scan", URL])
+        section = capsys.readouterr().out.partition("Similar skills")[2]
+        assert "skills/resize/SKILL.md" not in section
+
+    def test_a_repo_without_duplicates_says_nothing_about_similarity(self, fake_clone, in_tmp_cwd, capsys):
+        fake_clone({"skills/resize/SKILL.md": skill_md("resize", "Shrinks an image to fit a box.")})
+        assert cli.main(["scan", URL]) == 0
+        assert "Similar" not in capsys.readouterr().out
+        assert "Similar groups" not in (in_tmp_cwd / "report.html").read_text(encoding="utf-8")
+
+    def test_no_similar_drops_the_section_from_both_outputs(self, fake_clone, in_tmp_cwd, capsys):
+        fake_clone(TWINS)
+        assert cli.main(["scan", URL, "--no-similar"]) == 0
+
+        out = capsys.readouterr().out
+        assert "Found 3 skills:" in out  # the skills themselves are untouched
+        assert "Similar skills" not in out
+        assert "Similar groups" not in (in_tmp_cwd / "report.html").read_text(encoding="utf-8")
+
+    def test_raising_the_bar_to_one_keeps_only_identical_skills(self, fake_clone, capsys):
+        fake_clone(
+            {
+                "a/SKILL.md": skill_md("deploy", "Deploy the service to production."),
+                "b/SKILL.md": skill_md("deploy", "Deploy the service to production, quickly."),
+            }
+        )
+        assert cli.main(["scan", URL, "--similarity", "1"]) == 0
+        assert "Similar skills" not in capsys.readouterr().out
+
+    def test_lowering_the_bar_gathers_more(self, fake_clone, capsys):
+        fake_clone(TWINS)
+        assert cli.main(["scan", URL, "--similarity", "0"]) == 0
+        out = capsys.readouterr().out
+        assert "Similar skills (1 group;" in out
+        assert "skills/resize/SKILL.md" in out.partition("Similar skills")[2]
+
+    def test_omitting_the_flag_falls_back_to_the_module_default(self):
+        args = cli.build_parser().parse_args(["scan", URL])
+        assert args.similarity == cli.DEFAULT_THRESHOLD
+        assert args.no_similar is False
+
+    @pytest.mark.parametrize("bad", ["-0.1", "1.1", "50%", "half", "", " ", "nan", "inf"])
+    def test_a_threshold_outside_the_scale_is_a_usage_error(self, bad: str):
+        """Exit 2 before the clone, for the same reason a bad --port is."""
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["scan", URL, "--similarity", bad])
+        assert exc.value.code == 2
+
+    @pytest.mark.parametrize("edge", ["0", "0.5", "1"])
+    def test_the_scale_boundaries_are_accepted(self, edge: str):
+        assert cli.build_parser().parse_args(["scan", URL, "--similarity", edge]).similarity == float(edge)
+
+
 class TestServesTheReport:
     def test_the_default_port_is_8888(self):
         """Read from the import-time capture: the autouse fixture moves it to 0."""
