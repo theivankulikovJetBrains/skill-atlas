@@ -1,6 +1,10 @@
 # Generated report (default CLI output path)
 report.html
 
+# Everything the demo-video skill produces: frames, fixture repos, reports and demo.mp4.
+# Rebuilt from scratch on every run, so none of it is worth keeping.
+/demo-run/
+
 # Python build / cache
 __pycache__/
 *.py[cod]

@@ -17,6 +17,7 @@ Nothing is installed globally; everything runs through `uv` (Python ≥3.14, `gi
 | Tests | `uv run pytest` |
 | One test file or case | `uv run pytest tests/test_scanner.py -k frontmatter` |
 | Run the CLI | `uv run skill-atlas scan <git repo url>` |
+| Run every scenario and film it | `python .claude/skills/demo-video/scripts/record_demo.py` |
 | Build sdist + wheel | `uv build` |
 
 The suite finishes in seconds — there is no reason to skip it or to run a subset as a final
@@ -107,7 +108,14 @@ src/skill_atlas/
 tests/                       one test module per source module; conftest.py has make_repo
 spec/cli.md                  the behaviour contract
 scripts/sbx-feature.sh       one worktree + one sandbox per feature (host tooling, not shipped)
+.claude/skills/demo-video/   runs every scenario in spec/cli.md and films it (host tooling too)
 ```
+
+The suite pins behaviour; the `demo-video` skill pins the parts a unit test cannot reach — the
+report's JavaScript in a real browser, and the server and browser-opening path that only
+happens when stdout is a terminal. It asserts as it goes and exits non-zero on a red scenario,
+so it is a check that happens to produce a video, not a screencast that happens to run the app.
+Its scenario list is a reading of `spec/cli.md`: when behaviour moves, move that too.
 
 Data flows one way: `repo` → `scanner` → `similarity` → `models` → `report` → `cli`. Keep it that way;
 nothing below `cli.py` should print, and nothing should reach the network outside `repo.py` —
@@ -236,11 +244,12 @@ Follow what the existing modules already do rather than importing a new style:
 
 ## Gotchas
 
-- The root `.gitignore` covers generated output: `report.html`, `__pycache__/`, `*.py[cod]`,
-  `dist/`, `.venv/` and `.pytest_cache/`. The bare `report.html` pattern matches at any
-  depth, so generated reports left inside the package directory are ignored too. The
+- The root `.gitignore` covers generated output: `report.html`, `/demo-run/`, `__pycache__/`,
+  `*.py[cod]`, `dist/`, `.venv/` and `.pytest_cache/`. The bare `report.html` pattern matches
+  at any depth, so generated reports left inside the package directory are ignored too. The
   template is `templates/report.html.j2` and is *not* matched — gitignore patterns match
-  full names, not prefixes.
+  full names, not prefixes. `/demo-run/` is anchored because it is one specific directory at
+  the root; the `demo-video` skill builds everything else it needs outside the checkout.
 - `.gitattributes` pins `*.sh` to LF. Git for Windows would otherwise check the scripts out
   as CRLF, and bash reads the trailing `\r` as part of the command — the script dies with
   `$'\r': command not found` before doing anything. Nothing else is normalised, so the rest
