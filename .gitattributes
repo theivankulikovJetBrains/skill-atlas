@@ -1,0 +1,6 @@
+# Shell scripts keep LF even on a Windows checkout. Git for Windows turns core.autocrlf on
+# in its system config, and bash reads the trailing \r of a CRLF line as part of the command
+# itself -- a checked-out script then dies with "$'\r': command not found" before it does
+# anything. scripts/sbx-feature.sh is meant to be run from Git Bash, so this is the
+# difference between it working on a fresh clone and not running at all.
+*.sh text eol=lf

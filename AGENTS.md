@@ -27,6 +27,53 @@ not appear on Linux is usually one of those, not a failure hiding.
 Add dependencies with `uv add <pkg>` (or `uv add --dev <pkg>`) so `uv.lock` moves with
 `pyproject.toml`; CI runs `--locked` and fails on a stale lock.
 
+## Sandboxed feature development
+
+`scripts/sbx-feature.sh` gives each feature its own git worktree *and* its own Docker
+Sandboxes container, so two features can be developed at once without sharing a checkout,
+a `.venv` or a `report.html`. Needs `sbx` (Docker Sandboxes) and a running JetBrains
+Central proxy.
+
+| Task | Command |
+|---|---|
+| Start a feature and attach | `scripts/sbx-feature.sh start <feature>` |
+| Set one up without attaching | `scripts/sbx-feature.sh start -d <feature>` |
+| List worktrees and sandboxes | `scripts/sbx-feature.sh list` |
+| Stop the container, keep the code | `scripts/sbx-feature.sh stop <feature>` |
+| Throw the whole feature away | `scripts/sbx-feature.sh rm <feature>` |
+
+For two in parallel, `start -d` each one and then attach from separate terminals. Re-running
+`start` on an existing feature is safe: it reuses the worktree and sandbox and re-applies the
+credentials.
+
+The feature name becomes the branch, the sibling worktree directory (`../<feature>`) and the
+sandbox name at once, so it is restricted to what `sbx` accepts: two or more characters of
+letters, digits, `.` or `-`, starting with a letter or digit.
+
+Two details in the script are load-bearing and easy to "simplify" into breakage:
+
+- **The sandbox gets two workspaces**: the worktree and the repo's `.git`. A worktree's
+  `.git` is a *file* pointing at `<repo>/.git/worktrees/<feature>`, so without the second
+  mount git inside the container has nothing to resolve. The script rewrites that pointer to
+  a **relative** path, which is what makes it valid on the host and in the container at the
+  same time — `git worktree repair` rewrites it back to an absolute Windows path and breaks
+  the container, so don't run it on a feature worktree.
+- **Feature worktrees are pinned to LF** (`core.autocrlf=false` per worktree, via
+  `extensions.worktreeConfig`). Git for Windows turns `autocrlf` on in its *system* config,
+  which does not exist in the container: the host would check files out as CRLF while
+  container git compares them against LF blobs, every untouched file would read as modified
+  there, and `git commit -a` would commit a CRLF copy of the whole tree. The main worktree
+  keeps its own checkout style.
+
+Auth comes from Central, not from an Anthropic key. Each `start` re-reads the proxy key and
+hands it to the sandbox as a bare `-e NAME`, which copies the value out of the environment
+rather than putting it in `argv` where `ps` and shell history would catch it. Central binds
+`127.0.0.1` only, but every sandbox egresses through sbx's own proxy, which resolves
+`host.docker.internal` host-side and can therefore reach host loopback — so this needs a
+per-sandbox policy rule and no port forwarding. The rule has to name `localhost:<port>`,
+because policy is evaluated against the *resolved* name; a `host.docker.internal` rule alone
+still yields `Blocked by network policy: domain localhost:<port>`.
+
 ## Layout
 
 ```
@@ -39,6 +86,7 @@ src/skill_atlas/
   templates/report.html.j2   the HTML report (Jinja2, packaged as data)
 tests/                       one test module per source module; conftest.py has make_repo
 spec/cli.md                  the behaviour contract
+scripts/sbx-feature.sh       one worktree + one sandbox per feature (host tooling, not shipped)
 ```
 
 Data flows one way: `repo` → `scanner` → `models` → `report` → `cli`. Keep it that way;
@@ -121,9 +169,20 @@ Follow what the existing modules already do rather than importing a new style:
   depth, so generated reports left inside the package directory are ignored too. The
   template is `templates/report.html.j2` and is *not* matched — gitignore patterns match
   full names, not prefixes.
+- `.gitattributes` pins `*.sh` to LF. Git for Windows would otherwise check the scripts out
+  as CRLF, and bash reads the trailing `\r` as part of the command — the script dies with
+  `$'\r': command not found` before doing anything. Nothing else is normalised, so the rest
+  of the tree keeps whatever line endings your checkout already uses.
 - `report.html` is the CLI's default output path, so it appears at the repo root as soon as
   anyone runs a scan. Never point a test or a scan at it as a scratch output — a stale copy
   on disk can make assertions pass against nothing. Write to a temp path instead, as CI
   does, and guard it with `test ! -e`.
 - `.idea/` is tracked, including `workspace.xml`, so IDE state shows up as diff noise.
   Don't sweep those changes into an unrelated commit.
+- A feature worktree's `.venv` is built *inside* its Linux sandbox, so `uv run` on the
+  Windows host in that directory will not work against it — run the suite in the sandbox, or
+  delete `.venv` first if you want a host one. `.gitignore` already covers it either way.
+- Every feature sandbox mounts the *same* `<repo>/.git` read-write, which is what lets each
+  one commit to its own branch. Git's own locking makes that safe for ordinary work, but it
+  does mean two sandboxes share refs and objects: a `git gc`, a force-push or a branch
+  deletion from inside one is visible to the other and to the host.
