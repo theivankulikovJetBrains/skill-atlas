@@ -19,7 +19,7 @@ Nothing is installed globally; everything runs through `uv` (Python ≥3.14, `gi
 | Run the CLI | `uv run skill-atlas scan <git repo url>` |
 | Build sdist + wheel | `uv build` |
 
-The suite is 185 tests and finishes in about 9 seconds — there is no reason to skip it or to
+The suite is 200 tests and finishes in about 9 seconds — there is no reason to skip it or to
 run a subset as a final check. Two of them probe the filesystem and skip themselves where it
 cannot oblige: one needs case-sensitive names, the other needs symlinks.
 

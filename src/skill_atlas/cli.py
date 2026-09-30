@@ -154,6 +154,22 @@ def _serve_report(path: Path, port: int) -> None:
             print()  # the echoed ^C left the cursor mid-line; stopping is not an error
 
 
+def _port(value: str) -> int:
+    """Parse ``--port``, rejecting what the socket layer would only refuse later.
+
+    A bad port is a bad argument, so it belongs to argparse and exit code 2. Left to
+    ``bind()`` it would instead surface as a stderr line after the clone and the scan
+    had already run, looking like a busy port rather than a typo.
+    """
+    try:
+        port = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a whole number") from None
+    if not 0 <= port <= 65535:
+        raise argparse.ArgumentTypeError(f"{port} is outside the port range 0-65535")
+    return port
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="skill-atlas",
@@ -177,6 +193,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"where to write the HTML report (default: ./{DEFAULT_REPORT})",
     )
     scan.add_argument("--no-html", action="store_true", help="print to the terminal only")
+    scan.add_argument(
+        "--port",
+        type=_port,
+        # Read at parse time, not import time, so the default tracks the constant.
+        default=DEFAULT_PORT,
+        metavar="<n>",
+        help=f"port for the report server (default: {DEFAULT_PORT}; 0 picks any free port)",
+    )
     scan.add_argument(
         "--no-open",
         action="store_true",
@@ -213,7 +237,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             return EXIT_ERROR
         print(f"\nReport written to {path.resolve()}")
         if _should_open(args):
-            _serve_report(path, DEFAULT_PORT)
+            _serve_report(path, args.port)
 
     return EXIT_OK
 

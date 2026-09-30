@@ -3,7 +3,7 @@ CLI utility which scans a git repository and finds all AI agent skills.
 
 ## Usage
 ```
-skill-atlas scan <git repo url> [--ref <branch|tag>] [-o <path>] [--no-html] [--no-open]
+skill-atlas scan <git repo url> [--ref <branch|tag>] [-o <path>] [--no-html] [--port <n>] [--no-open]
 ```
 Not installed globally; run through uv:
 ```
@@ -16,6 +16,7 @@ uv run --project <repo> skill-atlas scan <url>     # from any other directory
 | `--ref` | default branch | branch or tag to scan |
 | `-o`, `--out` | `./report.html` | HTML report destination |
 | `--no-html` | off | terminal output only |
+| `--port` | `8888` | port for the report server; `0` picks any free one |
 | `--no-open` | off | leave the report closed instead of serving and opening it |
 | `--version` | | print version and exit |
 
@@ -27,7 +28,7 @@ uv run --project <repo> skill-atlas scan <url>     # from any other directory
 ## Output
 - Console: skill name, repo-relative file path, description — plus the source URL and scanned commit.
 - `report.html`, written to the working directory and overwritten if present: standalone (no external assets), UTF-8, light/dark. On github/gitlab/bitbucket/codeberg URLs each skill links to its file at the scanned commit.
-- The written report is then served at `http://localhost:8888/`, which is what opens in the default browser. The server listens on `127.0.0.1` only, holds a copy of the report in memory, and answers `/` alone — every other path is a 404, so files sitting next to the report are never published. It keeps serving, so the page can be reloaded, until Ctrl+C; that ends the scan with exit `0`. Skipped by `--no-open`, by `--no-html`, when stdout is not a terminal (a pipe or CI, where the wait would hang the step), and on Linux without `DISPLAY`/`WAYLAND_DISPLAY` — where `webbrowser` would otherwise reach for lynx and seize the terminal. Neither a port already in use nor a browser that will not start is an error: the report is already on disk, and the reason goes to stderr.
+- The written report is then served at `http://localhost:8888/`, or at `--port <n>` — `0` asks the OS for any free port, and the URL printed and opened always names the port actually bound. A port outside `0-65535`, or one that is not a whole number, is a usage error (exit `2`) rather than a bind failure after the scan. The served URL is what opens in the default browser. The server listens on `127.0.0.1` only, holds a copy of the report in memory, and answers `/` alone — every other path is a 404, so files sitting next to the report are never published. It keeps serving, so the page can be reloaded, until Ctrl+C; that ends the scan with exit `0`. Skipped by `--no-open`, by `--no-html`, when stdout is not a terminal (a pipe or CI, where the wait would hang the step), and on Linux without `DISPLAY`/`WAYLAND_DISPLAY` — where `webbrowser` would otherwise reach for lynx and seize the terminal. Neither a port already in use nor a browser that will not start is an error: the report is already on disk, and the reason goes to stderr.
 
 ## Exit codes
 `0` success, including a repo with no skills. `1` clone failed or report unwritable. `2` bad arguments.

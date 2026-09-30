@@ -282,6 +282,59 @@ class TestOpensTheReport:
         assert (in_tmp_cwd / "report.html").is_file()
 
 
+class TestPortFlag:
+    def test_the_chosen_port_is_the_one_bound_and_opened(self, fake_clone, opened, monkeypatch):
+        port = free_port()
+        at_a_terminal(monkeypatch)
+        fake_clone()
+        assert cli.main(["scan", URL, "--port", str(port)]) == 0
+        assert opened == [f"http://localhost:{port}/"]
+
+    def test_port_zero_takes_any_free_one_and_reports_it(self, fake_clone, opened, no_server_loop, monkeypatch):
+        """0 is the OS asking-for-anything port; the URL must name what it got."""
+        at_a_terminal(monkeypatch)
+        fake_clone()
+        assert cli.main(["scan", URL, "--port", "0"]) == 0
+        bound = no_server_loop[0].server_address[1]
+        assert bound != 0
+        assert opened == [f"http://localhost:{bound}/"]
+
+    def test_omitting_the_flag_falls_back_to_the_module_default(self):
+        """Pinned to the constant, not to 8888: the autouse fixture moves it to 0, and
+        the shipped value is asserted separately."""
+        args = cli.build_parser().parse_args(["scan", URL])
+        assert args.port == cli.DEFAULT_PORT
+
+    @pytest.mark.parametrize("bad", ["-1", "65536", "99999", "http", "8.5", "", " "])
+    def test_a_port_that_could_never_bind_is_a_usage_error(self, bad: str):
+        """Exit 2 before the clone, rather than a stderr line after the whole scan."""
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["scan", URL, "--port", bad])
+        assert exc.value.code == 2
+
+    @pytest.mark.parametrize("edge", ["0", "1", "65535"])
+    def test_the_range_boundaries_are_accepted(self, edge: str):
+        assert cli.build_parser().parse_args(["scan", URL, "--port", edge]).port == int(edge)
+
+    def test_a_chosen_port_already_taken_is_reported_not_fatal(self, fake_clone, in_tmp_cwd, opened, monkeypatch, capsys):
+        """Asking for a busy port explicitly is still not a failed scan -- the report
+        is on disk either way, and the reason goes to stderr."""
+        at_a_terminal(monkeypatch)
+        fake_clone()
+        with taken_port() as port:
+            assert cli.main(["scan", URL, "--port", str(port)]) == 0
+        assert opened == []
+        assert f"not serving the report on port {port}" in capsys.readouterr().err
+        assert (in_tmp_cwd / "report.html").is_file()
+
+    def test_no_open_wins_over_an_explicit_port(self, fake_clone, in_tmp_cwd, opened, monkeypatch):
+        at_a_terminal(monkeypatch)
+        fake_clone()
+        assert cli.main(["scan", URL, "--port", str(free_port()), "--no-open"]) == 0
+        assert opened == []
+        assert (in_tmp_cwd / "report.html").is_file()
+
+
 class TestServesTheReport:
     def test_the_default_port_is_8888(self):
         """Read from the import-time capture: the autouse fixture moves it to 0."""
