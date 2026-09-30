@@ -19,9 +19,10 @@ Nothing is installed globally; everything runs through `uv` (Python ≥3.14, `gi
 | Run the CLI | `uv run skill-atlas scan <git repo url>` |
 | Build sdist + wheel | `uv build` |
 
-The suite is 200 tests and finishes in about 9 seconds — there is no reason to skip it or to
-run a subset as a final check. Two of them probe the filesystem and skip themselves where it
-cannot oblige: one needs case-sensitive names, the other needs symlinks.
+The suite finishes in seconds — there is no reason to skip it or to run a subset as a final
+check. A few tests probe the filesystem and skip themselves where it cannot oblige: one
+needs case-sensitive names, another needs symlinks. A skip on Windows or macOS that does
+not appear on Linux is usually one of those, not a failure hiding.
 
 Add dependencies with `uv add <pkg>` (or `uv add --dev <pkg>`) so `uv.lock` moves with
 `pyproject.toml`; CI runs `--locked` and fails on a stale lock.
