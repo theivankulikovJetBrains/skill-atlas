@@ -1473,6 +1473,7 @@ PAGE = """<!DOCTYPE html>
   table.tally td.id {{ color: #7f8fa8; }}
   table.tally td.what {{ color: #cfe0ff; font-family: inherit; }}
   table.tally td.mark {{ white-space: nowrap; }}
+  table.tally td.head {{ color: #6f7f99; font-family: inherit; padding-bottom: 9px; }}
   main.wide table.tally {{ font-size: 15px; }}
   main.wide table.tally td.id {{ white-space: nowrap; }}
 </style></head><body>{body}</body></html>
@@ -1531,16 +1532,20 @@ def scope_frame(scope: Scope, filmed: int) -> Frame:
     suite passing, and this frame is the run showing its working: the range, every change in
     it, the topics each one mapped to, and the scenarios that mapping left on the floor.
     """
-    mapped = "".join(
+    head = '<tr><td class="head" colspan="2">{}</td></tr>'
+    mapped = head.format("this change touches &mdash; and reaches") + ("".join(
         f'<tr><td class="what">{escape(what)}</td>'
         f'<td class="id">{escape(", ".join(topics))}</td></tr>'
         for what, topics in scope.mapped[:22]
-    ) or '<tr><td class="what">(the diff is empty)</td><td class="id">&mdash;</td></tr>'
+    ) or '<tr><td class="what">(the diff is empty)</td><td class="id">&mdash;</td></tr>')
     if len(scope.mapped) > 22:
         mapped += f'<tr><td class="id">&hellip; and {len(scope.mapped) - 22} more</td><td></td></tr>'
-    left = "".join(
+    left = head.format(
+        "not filmed &mdash; nothing in the change reaches these" if scope.declined
+        else "nothing left out: this change reaches every scenario"
+    ) + "".join(
         f'<tr><td class="id">{escape(sid)}</td><td class="what">{escape(caption)}</td></tr>'
-        for sid, caption in scope.declined[:22]
+        for sid, caption in sorted(scope.declined)[:22]
     )
     if len(scope.declined) > 22:
         left += f'<tr><td class="id">&hellip;</td><td class="what">and {len(scope.declined) - 22} more</td></tr>'
@@ -1792,7 +1797,7 @@ def scope_lines(scope: Scope) -> list[str]:
     lines = [
         f"Scoped to **{scope.label}**"
         + (f" — {scope.detail}" if scope.detail else "")
-        + f", diffed as `{scope.rev_range}`.",
+        + (f", diffed as `{scope.rev_range}`." if scope.label != scope.rev_range else "."),
         "",
         f"Topics reached: {', '.join(sorted(scope.topics)) or '(none)'}.",
         "",
@@ -1810,17 +1815,24 @@ def scope_lines(scope: Scope) -> list[str]:
             "reaches them:",
             "",
         ]
-        lines += [f"- {sid} — {caption}" for sid, caption in scope.declined]
+        # Sorted, not in the order they were declined: the UI steps are picked before the CLI
+        # list runs, so that order is an artefact of the machinery rather than of the suite.
+        lines += [f"- {sid} — {caption}" for sid, caption in sorted(scope.declined)]
         lines.append("")
     return lines
 
 
 def tally(steps: list[Scenario], scope: Scope) -> str:
+    if not steps:
+        # "0 of 0 green" is a true sentence that reads as a result. This is not a result.
+        return (f"No scenario in `spec/cli.md` is reachable from {scope.label}, so there was "
+                f"nothing to film. What the change touches, and what each part of it maps to, "
+                f"is below.")
     passed = sum(1 for s in steps if s.ok)
-    what = f"every scenario {scope.label} reaches" if scope.scoped else "every scenario"
+    what = ("every scenario in `spec/cli.md` that "
+            f"{scope.label} reaches") if scope.scoped else "every scenario in `spec/cli.md`"
     return (f"{passed} of {len(steps)} scenarios green, "
-            f"{sum(len(s.checks) for s in steps)} assertions — {what} in `spec/cli.md`, "
-            f"run for real.")
+            f"{sum(len(s.checks) for s in steps)} assertions — {what}, run for real.")
 
 
 def write_pr_section(
@@ -1842,25 +1854,28 @@ def write_pr_section(
         "     a dropped GIF plays in the body, where an mp4 becomes a player to press. -->",
         "",
         "",
-    ] if gif is not None else [f"<!-- No GIF was produced: {note} -->", ""]
-    lines = [
-        "## Demo",
-        "",
-        *drop,
-        tally(steps, scope),
-        "",
+    ] if gif is not None else [f"<!-- No GIF to attach: {note} -->", ""]
+    lines = ["## Demo", "", *drop, tally(steps, scope), ""]
+    if not steps:
+        # No verdicts to fold away, and the scope table is then the whole point of the
+        # section: it is what says which parts of the app this change is not about.
+        lines += scope_lines(scope)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return
+    lines += [
         f"Filmed by `.claude/skills/demo-video` ({note}).",
         "",
         "<details><summary>Every scenario, and its verdict</summary>",
         "",
         "| Scenario | What it proves | Checks | Verdict |",
         "|---|---|---|---|",
+        *(f"| {s.id} | {s.caption} | {len(s.checks)} | {'PASS' if s.ok else '**FAIL**'} |"
+          for s in steps),
+        "",
+        *scope_lines(scope),
+        "</details>",
+        "",
     ]
-    lines += [
-        f"| {s.id} | {s.caption} | {len(s.checks)} | {'PASS' if s.ok else '**FAIL**'} |"
-        for s in steps
-    ]
-    lines += ["", *scope_lines(scope), "</details>", ""]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -1875,9 +1890,11 @@ def write_transcript(
         f"Video: `{video}`  ({note})" if video else f"No video: {note}",
         "",
         *scope_lines(scope),
-        "| Scenario | What it proves | Checks | Verdict |",
-        "|---|---|---|---|",
     ]
+    if not steps:
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return
+    lines += ["| Scenario | What it proves | Checks | Verdict |", "|---|---|---|---|"]
     for step in steps:
         lines.append(
             f"| {step.id} | {step.caption} | {len(step.checks)} | "
@@ -2052,7 +2069,8 @@ def main(argv: list[str] | None = None) -> int:
             for bad in (c for c in step.checks if not c.pass_):
                 say(f"        {bad.label}: {bad.actual}  (expected {bad.expected})")
 
-    say("Driving the report in Edge...")
+    if wanted_ui:
+        say("Driving the report in Edge...")
     pairs = build_ui_frames(wanted_ui, driver.reports)
     missing = {s.id for s in wanted_ui} - {step.id for step, _ in pairs}
     frames: list[Frame] = [title_frame(repo_url, project, scope)]
@@ -2113,7 +2131,7 @@ def main(argv: list[str] | None = None) -> int:
     passed = sum(1 for s in steps if s.ok)
     say("")
     say(f"{passed}/{len(steps)} scenarios green, {sum(len(s.checks) for s in steps)} assertions")
-    if scope.scoped:
+    if scope.declined:
         say(f"{len(scope.declined)} scenarios not filmed: nothing in {scope.label} reaches them")
     say(f"video      {video or '(none: ' + note + ')'}")
     if want_gif:
