@@ -57,11 +57,13 @@ straight on to the work. `-d` is not optional for that — plain `start` ends in
 | Set one up without attaching | `scripts/sbx-feature.sh start -d <feature>` |
 | List worktrees and sandboxes | `scripts/sbx-feature.sh list` |
 | Stop the container, keep the code | `scripts/sbx-feature.sh stop <feature>` |
-| Throw the whole feature away | `scripts/sbx-feature.sh rm <feature>` |
+| Remove the container, worktree and branch | `scripts/sbx-feature.sh rm <feature>` |
 
 For two in parallel, `start -d` each one and then attach from separate terminals. Re-running
 `start` on an existing feature is safe: it reuses the worktree and sandbox and re-applies the
-credentials.
+credentials. `rm` is how a feature normally ends rather than a way to abandon one — it is
+step 8 of the Definition of Done, and `start -d` on the same name brings the worktree back on
+the existing branch if review reopens the work.
 
 The feature name becomes the branch, the sibling worktree directory (`../<feature>`) and the
 sandbox name at once, so it is restricted to what `sbx` accepts: two or more characters of
