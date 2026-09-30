@@ -213,6 +213,24 @@ Follow what the existing modules already do rather than importing a new style:
    unauthenticated calls from this network get HTTP 403 (rate limit), not an answer. Never
    echo `$token`. Do not report CI as passing on the strength of a local run; say whether you
    checked the run itself or only ran the suite locally.
+8. Clean up the feature: once the run is green, throw away the sandbox and the worktree.
+   Waiting for the merge is not worth it — the PR reads the branch from `origin`, so nothing
+   local is still holding the work, and a worktree left behind is a second checkout of that
+   branch for the next session to trip over. Call **ExitWorktree** first so the shell is back
+   in the main checkout, then run one command from there:
+   ```bash
+   scripts/sbx-feature.sh rm <feature>
+   ```
+   Running `git worktree remove` from *inside* the worktree is the failure to avoid: git
+   unregisters it and deletes the contents, then cannot delete the directory it is standing in
+   ("Permission denied" on Windows), and the empty leftover makes the next
+   `start <feature>` report "already exists, reusing it" and hand the sandbox a checkout with
+   no `.git`. Ignored files (`.venv/`, `report.html`) do not get in the way, but anything
+   genuinely untracked or modified makes the remove refuse instead of discarding it — that is
+   a finding to look at and commit or delete deliberately, not something to force past. The
+   last step is `git branch -d`, so an unmerged branch survives with a message saying so;
+   leave it. Cleaning up costs nothing if review comes back: `start -d <feature>` re-adds the
+   worktree and checks the existing branch straight back out.
 
 ## Gotchas
 
