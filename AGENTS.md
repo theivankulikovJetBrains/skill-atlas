@@ -171,22 +171,45 @@ Follow what the existing modules already do rather than importing a new style:
    grep -q "<title>Skill Atlas" "$out"
    ```
 4. `spec/cli.md` matches the behaviour that now exists.
-5. Commit and push. CI (GitHub Actions: `.github/workflows/ci.yml`) then runs the same
-   `uv sync --locked` + `pytest` on three OSes, plus the wheel smoke test.
-6. Confirm the pushed run is green and fix it if it is not. `gh` is **not** installed, but
-   the run can still be read from the shell: Git Credential Manager holds a `github.com`
-   token with `repo, workflow` scope, so query the Actions API directly.
+5. Commit and push the feature branch — `git push -u origin HEAD` from the worktree. Work
+   does not land on `main` directly; the branch is what the pull request is opened from.
+6. Open a pull request against `main`. This is part of finishing, not paperwork for later:
+   CI (`.github/workflows/ci.yml`) triggers on `pull_request` and on pushes to `main` only,
+   so a pushed feature branch with no PR gets **no run at all** and step 7 has nothing to
+   confirm. `gh` is **not** installed, but Git Credential Manager holds a `github.com` token
+   with `repo, workflow` scope, so the API can be driven straight from the shell.
    ```bash
    # GIT_TERMINAL_PROMPT/GCM_INTERACTIVE keep the helper from opening a GUI prompt if the
    # credential is ever missing -- without them this hangs instead of failing.
    token=$(printf 'protocol=https\nhost=github.com\n\n' |
      GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never git credential fill | sed -n 's/^password=//p')
    repo=theivankulikovJetBrains/skill-atlas
-   curl -s -H "Authorization: Bearer $token" \
-     "https://api.github.com/repos/$repo/actions/runs?per_page=1"   # .workflow_runs[0].conclusion
+   # -d @- reads the body from the heredoc, so quotes and newlines never go through argv.
+   curl -s -X POST -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
+     "https://api.github.com/repos/$repo/pulls" -d @- <<'JSON'   # .html_url, .number
+   {"title": "Stop the suite from opening real browser tabs",
+    "head": "no-browser-in-tests",
+    "base": "main",
+    "body": "Why the change exists, then what moved.\n\n`uv run pytest` green on ..."}
+   JSON
    ```
-   Match `head_sha` against the commit you pushed — a `success` from an older run proves
-   nothing. Add `/<run_id>/jobs` for per-OS detail when a run is red. The header is required:
+   `head` is the branch name, which is also the feature and worktree name. Title in the
+   imperative, same voice as the commit subjects (`Group skills that read as near-duplicates`,
+   not `Added grouping`). The body is prose, not a checklist: why the change exists first,
+   then what moved, then what you verified — match PRs #1 and #2. A second POST for a branch
+   that already has an open PR returns 422 `A pull request already exists`; that is the
+   correct outcome of a retry, so read the existing one from
+   `?head=theivankulikovJetBrains:<branch>` rather than opening another. Merging the PR is the
+   human's call unless they ask you to do it.
+7. Confirm the PR's run is green and fix it if it is not. Reuse `$token` and `$repo`:
+   ```bash
+   curl -s -H "Authorization: Bearer $token" \
+     "https://api.github.com/repos/$repo/actions/runs?branch=<feature>&per_page=1"
+   ```
+   `.workflow_runs[0].conclusion` is the answer; the same call without `branch=` gives the
+   newest run repo-wide, which during parallel features is somebody else's. Match `head_sha`
+   against the commit you pushed — a `success` from an older run proves nothing. Add
+   `/<run_id>/jobs` for per-OS detail when a run is red. The header is required:
    unauthenticated calls from this network get HTTP 403 (rate limit), not an answer. Never
    echo `$token`. Do not report CI as passing on the strength of a local run; say whether you
    checked the run itself or only ran the suite locally.
