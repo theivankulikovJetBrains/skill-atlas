@@ -198,7 +198,10 @@ Follow what the existing modules already do rather than importing a new style:
    `head` is the branch name, which is also the feature and worktree name. Title in the
    imperative, same voice as the commit subjects (`Group skills that read as near-duplicates`,
    not `Added grouping`). The body is prose, not a checklist: why the change exists first,
-   then what moved, then what you verified — match PRs #1 and #2. A second POST for a branch
+   then what moved, then what you verified — match PRs #1 and #2.
+   `.github/pull_request_template.md` spells that shape out, but GitHub only pre-fills it in
+   the web UI; a PR created through the API gets exactly the body you send, so follow the
+   template by hand rather than assuming it applied. A second POST for a branch
    that already has an open PR returns 422 `A pull request already exists`; that is the
    correct outcome of a retry, so read the existing one from
    `?head=theivankulikovJetBrains:<branch>` rather than opening another. Merging the PR is the
