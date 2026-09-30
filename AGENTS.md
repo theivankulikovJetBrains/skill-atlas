@@ -89,10 +89,23 @@ Follow what the existing modules already do rather than importing a new style:
 4. `spec/cli.md` matches the behaviour that now exists.
 5. Commit and push. CI (GitHub Actions: `.github/workflows/ci.yml`) then runs the same
    `uv sync --locked` + `pytest` on three OSes, plus the wheel smoke test.
-6. Confirm the pushed run is green and fix it if it is not. `gh` is **not** installed in
-   this environment, so the run cannot be watched from the shell — either ask the user to
-   check the Actions tab, or install `gh` first. Do not report CI as passing on the strength
-   of a local run; say which of the two you actually verified.
+6. Confirm the pushed run is green and fix it if it is not. `gh` is **not** installed, but
+   the run can still be read from the shell: Git Credential Manager holds a `github.com`
+   token with `repo, workflow` scope, so query the Actions API directly.
+   ```bash
+   # GIT_TERMINAL_PROMPT/GCM_INTERACTIVE keep the helper from opening a GUI prompt if the
+   # credential is ever missing -- without them this hangs instead of failing.
+   token=$(printf 'protocol=https\nhost=github.com\n\n' |
+     GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never git credential fill | sed -n 's/^password=//p')
+   repo=theivankulikovJetBrains/skill-atlas
+   curl -s -H "Authorization: Bearer $token" \
+     "https://api.github.com/repos/$repo/actions/runs?per_page=1"   # .workflow_runs[0].conclusion
+   ```
+   Match `head_sha` against the commit you pushed — a `success` from an older run proves
+   nothing. Add `/<run_id>/jobs` for per-OS detail when a run is red. The header is required:
+   unauthenticated calls from this network get HTTP 403 (rate limit), not an answer. Never
+   echo `$token`. Do not report CI as passing on the strength of a local run; say whether you
+   checked the run itself or only ran the suite locally.
 
 ## Gotchas
 
