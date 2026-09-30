@@ -16,7 +16,7 @@ uv run --project <repo> skill-atlas scan <url>     # from any other directory
 | `--ref` | default branch | branch or tag to scan |
 | `-o`, `--out` | `./report.html` | HTML report destination |
 | `--no-html` | off | terminal output only |
-| `--no-open` | off | leave the report closed instead of opening it |
+| `--no-open` | off | leave the report closed instead of serving and opening it |
 | `--version` | | print version and exit |
 
 ## Detection
@@ -27,7 +27,7 @@ uv run --project <repo> skill-atlas scan <url>     # from any other directory
 ## Output
 - Console: skill name, repo-relative file path, description — plus the source URL and scanned commit.
 - `report.html`, written to the working directory and overwritten if present: standalone (no external assets), UTF-8, light/dark. On github/gitlab/bitbucket/codeberg URLs each skill links to its file at the scanned commit.
-- The written report then opens in the default browser. Skipped by `--no-open`, by `--no-html`, when stdout is not a terminal (a pipe or CI), and on Linux without `DISPLAY`/`WAYLAND_DISPLAY` — where `webbrowser` would otherwise reach for lynx and seize the terminal. A browser that will not start is not an error: the report is already on disk.
+- The written report is then served at `http://localhost:8888/`, which is what opens in the default browser. The server listens on `127.0.0.1` only, holds a copy of the report in memory, and answers `/` alone — every other path is a 404, so files sitting next to the report are never published. It keeps serving, so the page can be reloaded, until Ctrl+C; that ends the scan with exit `0`. Skipped by `--no-open`, by `--no-html`, when stdout is not a terminal (a pipe or CI, where the wait would hang the step), and on Linux without `DISPLAY`/`WAYLAND_DISPLAY` — where `webbrowser` would otherwise reach for lynx and seize the terminal. Neither a port already in use nor a browser that will not start is an error: the report is already on disk, and the reason goes to stderr.
 
 ## Exit codes
 `0` success, including a repo with no skills. `1` clone failed or report unwritable. `2` bad arguments.

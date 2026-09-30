@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import io
+import socket
 import sys
+import threading
+import urllib.error
+import urllib.request
 import webbrowser
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 import pytest
-from conftest import nfc, skill_md
+from conftest import REAL_SERVE_FOREVER, SHIPPED_DEFAULT_PORT, nfc, skill_md
 
 from skill_atlas import cli
 from skill_atlas.repo import Checkout, RepoError
@@ -140,11 +144,54 @@ class TtyStream(io.TextIOWrapper):
 
 
 @pytest.fixture
-def opened(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+def opened(monkeypatch: pytest.MonkeyPatch, no_server_loop: list[cli._ReportServer]) -> list[str]:
     """Record what the CLI hands to the browser instead of launching one."""
     urls: list[str] = []
     monkeypatch.setattr(cli.webbrowser, "open", lambda url, *_a, **_kw: urls.append(url) or True)
     return urls
+
+
+def free_port() -> int:
+    """A port nothing is listening on -- as close to a guarantee as sockets allow."""
+    with closing(socket.socket()) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+@contextmanager
+def taken_port():
+    """Hold a port open so the next bind to it fails the way a busy 8888 would."""
+    with closing(socket.socket()) as holder:
+        holder.bind(("127.0.0.1", 0))
+        holder.listen(1)
+        yield holder.getsockname()[1]
+
+
+@contextmanager
+def serving(document: bytes):
+    """Run the real server in a thread and yield its base URL.
+
+    Deliberately the pre-fixture loop rather than the patched one: ``shutdown()``
+    waits on an event that only ``serve_forever`` sets, so stopping a server whose
+    loop never ran would block here instead of at the scan.
+    """
+    server = cli._ReportServer(("127.0.0.1", 0), document)
+    thread = threading.Thread(target=REAL_SERVE_FOREVER, args=(server,), daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def status_of(url: str) -> int:
+    try:
+        with urllib.request.urlopen(url, timeout=5) as response:
+            return response.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
 
 
 def at_a_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -159,24 +206,34 @@ def at_a_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestOpensTheReport:
-    def test_report_is_opened_after_a_scan(self, fake_clone, in_tmp_cwd, opened, monkeypatch):
+    def test_the_served_url_is_opened_after_a_scan(self, fake_clone, in_tmp_cwd, opened, no_server_loop, monkeypatch):
         at_a_terminal(monkeypatch)
         fake_clone()
         assert cli.main(["scan", URL]) == 0
-        assert opened == [(in_tmp_cwd / "report.html").resolve().as_uri()]
+        port = no_server_loop[0].server_address[1]
+        assert opened == [f"http://localhost:{port}/"]
 
-    def test_the_opened_url_is_absolute(self, fake_clone, in_tmp_cwd, opened, monkeypatch):
-        """``--out`` is relative by default, and a relative path has no file URI."""
+    def test_the_opened_url_names_the_port_actually_bound(self, fake_clone, opened, monkeypatch):
+        """A URL built from the requested port would say ``:0`` under this fixture."""
         at_a_terminal(monkeypatch)
         fake_clone()
         cli.main(["scan", URL])
-        assert opened[0].startswith("file:///")
+        assert opened[0].startswith("http://localhost:")
+        assert not opened[0].startswith("http://localhost:0/")
 
-    def test_custom_destination_is_the_one_opened(self, fake_clone, in_tmp_cwd, opened, monkeypatch):
+    def test_the_port_scanned_on_is_the_default(self, fake_clone, opened, monkeypatch):
+        port = free_port()
+        monkeypatch.setattr(cli, "DEFAULT_PORT", port)  # over the fixture's 0
+        at_a_terminal(monkeypatch)
+        fake_clone()
+        cli.main(["scan", URL])
+        assert opened == [f"http://localhost:{port}/"]
+
+    def test_custom_destination_is_the_document_served(self, fake_clone, in_tmp_cwd, opened, no_server_loop, monkeypatch):
         at_a_terminal(monkeypatch)
         fake_clone()
         cli.main(["scan", URL, "--out", "custom/atlas.html"])
-        assert opened == [(in_tmp_cwd / "custom" / "atlas.html").resolve().as_uri()]
+        assert no_server_loop[0].document == (in_tmp_cwd / "custom" / "atlas.html").read_bytes()
 
     def test_no_open_suppresses_it_but_still_writes(self, fake_clone, in_tmp_cwd, opened, monkeypatch):
         at_a_terminal(monkeypatch)
@@ -213,7 +270,7 @@ class TestOpensTheReport:
         assert opened == []
         assert (in_tmp_cwd / "report.html").is_file()
 
-    def test_a_failing_browser_does_not_fail_the_scan(self, fake_clone, in_tmp_cwd, monkeypatch):
+    def test_a_failing_browser_does_not_fail_the_scan(self, fake_clone, in_tmp_cwd, no_server_loop, monkeypatch):
         at_a_terminal(monkeypatch)
 
         def _boom(*_args, **_kwargs):
@@ -223,6 +280,98 @@ class TestOpensTheReport:
         fake_clone()
         assert cli.main(["scan", URL]) == 0
         assert (in_tmp_cwd / "report.html").is_file()
+
+
+class TestServesTheReport:
+    def test_the_default_port_is_8888(self):
+        """Read from the import-time capture: the autouse fixture moves it to 0."""
+        assert SHIPPED_DEFAULT_PORT == 8888
+
+    def test_the_report_is_what_the_server_returns(self, in_tmp_cwd):
+        document = "<h1>café</h1>".encode()
+        with serving(document) as base:
+            with urllib.request.urlopen(f"{base}/", timeout=5) as response:
+                assert response.status == 200
+                assert response.read() == document
+                assert response.headers["Content-Type"] == "text/html; charset=utf-8"
+
+    def test_head_answers_without_a_body(self, in_tmp_cwd):
+        document = b"<h1>head</h1>"
+        with serving(document) as base:
+            request = urllib.request.Request(f"{base}/", method="HEAD")
+            with urllib.request.urlopen(request, timeout=5) as response:
+                assert response.status == 200
+                assert response.headers["Content-Length"] == str(len(document))
+                assert response.read() == b""
+
+    def test_a_sibling_file_is_not_exposed(self, in_tmp_cwd):
+        """Rooting a directory handler at the report would publish the whole cwd."""
+        (in_tmp_cwd / "secret.txt").write_text("private", encoding="utf-8")
+        with serving(b"<h1>report</h1>") as base:
+            assert status_of(f"{base}/secret.txt") == 404
+
+    def test_an_unknown_path_does_not_take_the_server_down(self, in_tmp_cwd):
+        with serving(b"<h1>report</h1>") as base:
+            assert status_of(f"{base}/favicon.ico") == 404
+            assert status_of(f"{base}/") == 200
+
+    def test_a_query_string_still_reaches_the_report(self, in_tmp_cwd):
+        """Browsers and reloads append things like ``?`` on their own."""
+        with serving(b"<h1>report</h1>") as base:
+            assert status_of(f"{base}/?reload=1") == 200
+
+    def test_the_socket_is_closed_when_serving_ends(self, tmp_path, no_server_loop):
+        report = tmp_path / "report.html"
+        report.write_text("<h1>done</h1>", encoding="utf-8")
+        cli._serve_report(report, 0)
+        assert no_server_loop[0].socket.fileno() == -1
+
+    def test_a_busy_port_is_reported_not_raised(self, tmp_path, capsys):
+        report = tmp_path / "report.html"
+        report.write_text("<h1>busy</h1>", encoding="utf-8")
+        with taken_port() as port:
+            cli._serve_report(report, port)
+        assert f"not serving the report on port {port}" in capsys.readouterr().err
+
+    def test_a_busy_port_does_not_fail_the_scan(self, fake_clone, in_tmp_cwd, opened, monkeypatch):
+        at_a_terminal(monkeypatch)
+        fake_clone()
+        with taken_port() as port:
+            monkeypatch.setattr(cli, "DEFAULT_PORT", port)
+            assert cli.main(["scan", URL]) == 0
+        assert opened == []
+        assert (in_tmp_cwd / "report.html").is_file()
+
+    def test_an_unreadable_report_is_reported_not_raised(self, tmp_path, capsys):
+        cli._serve_report(tmp_path / "never-written.html", 0)
+        assert "not serving the report" in capsys.readouterr().err
+
+    def test_ctrl_c_stops_serving_without_an_error(self, fake_clone, in_tmp_cwd, opened, monkeypatch):
+        """Ctrl+C is how the user ends a served report, not a failed scan."""
+
+        def _interrupted(_self):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(cli._ReportServer, "serve_forever", _interrupted)
+        at_a_terminal(monkeypatch)
+        fake_clone()
+        assert cli.main(["scan", URL]) == 0
+        assert (in_tmp_cwd / "report.html").is_file()
+
+    def test_a_dropped_connection_prints_nothing(self, in_tmp_cwd, capsys):
+        """Closing the tab mid-response would otherwise look like a crash."""
+        server = cli._ReportServer(("127.0.0.1", 0), b"<h1>report</h1>")
+        with server:
+            server.handle_error(None, ("127.0.0.1", 0))
+        captured = capsys.readouterr()
+        assert (captured.out, captured.err) == ("", "")
+
+    def test_the_server_only_listens_on_loopback(self, tmp_path, no_server_loop):
+        """A report of a private repository is not for the rest of the network."""
+        report = tmp_path / "report.html"
+        report.write_text("<h1>local</h1>", encoding="utf-8")
+        cli._serve_report(report, 0)
+        assert no_server_loop[0].server_address[0] == "127.0.0.1"
 
 
 class TestBrowserAvailability:

@@ -7,6 +7,8 @@ import os
 import sys
 import webbrowser
 from datetime import datetime, timezone
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import __version__
@@ -16,6 +18,7 @@ from .repo import RepoError, clone, web_base_url
 from .scanner import find_skills
 
 DEFAULT_REPORT = "report.html"
+DEFAULT_PORT = 8888
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -39,7 +42,7 @@ def _harden_stdio() -> None:
 
 
 def _has_display() -> bool:
-    """Whether a graphical browser can be handed a ``file://`` URL.
+    """Whether a graphical browser can be handed the report's URL.
 
     On Linux with no display, :mod:`webbrowser` falls back to terminal browsers
     such as lynx, which would seize the terminal rather than show a report.
@@ -53,7 +56,8 @@ def _should_open(args: argparse.Namespace) -> bool:
     """Only open a report a human is waiting for and a browser can display.
 
     A piped or redirected stdout means a script or CI is driving us, where a
-    browser window is at best unseen and at worst a hung step.
+    browser window is at best unseen -- and since serving blocks until Ctrl+C,
+    a step nobody is watching would hang until the job times out.
     """
     if args.no_open or args.no_html:
         return False
@@ -63,17 +67,91 @@ def _should_open(args: argparse.Namespace) -> bool:
     return _has_display()
 
 
-def _open_in_browser(path: Path) -> None:
-    """Best effort: the report on disk is the deliverable, the window a convenience.
-
-    ``as_uri`` rejects a relative path, and ``--out`` is relative by default, so
-    resolve first. ValueError is deliberately not caught: it would mean that
-    slipped back in, and a silent no-op is how it hides.
-    """
+def _open_in_browser(url: str) -> None:
+    """Best effort: the report on disk is the deliverable, the window a convenience."""
     try:
-        webbrowser.open(path.resolve().as_uri())
+        webbrowser.open(url)
     except (webbrowser.Error, OSError):
         pass
+
+
+class _ReportHandler(BaseHTTPRequestHandler):
+    """Serve one in-memory document at ``/``, and 404 for everything else.
+
+    The report is standalone -- no external assets -- so there is nothing to gain
+    from rooting a :class:`~http.server.SimpleHTTPRequestHandler` at the report's
+    directory, which by default is the working directory: that would publish every
+    sibling file to anything that can reach the port.
+    """
+
+    def do_GET(self) -> None:
+        self._respond(with_body=True)
+
+    def do_HEAD(self) -> None:
+        self._respond(with_body=False)
+
+    def _respond(self, *, with_body: bool) -> None:
+        if self.path.split("?", 1)[0] not in {"/", "/index.html"}:
+            self.send_error(HTTPStatus.NOT_FOUND)  # a browser asking after /favicon.ico
+            return
+        document: bytes = self.server.document
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(document)))
+        self.end_headers()
+        if with_body:
+            self.wfile.write(document)
+
+    def log_message(self, *_args: object) -> None:
+        """Silence the per-request log: it would bury the scan output above it."""
+
+
+class _ReportServer(ThreadingHTTPServer):
+    """Localhost-only HTTP server holding the rendered report in memory."""
+
+    # HTTPServer turns SO_REUSEADDR on, which POSIX wants so that a second scan can
+    # rebind the port while the previous session's sockets sit in TIME_WAIT. Windows
+    # reads the same flag as permission to bind a port another process is already
+    # listening on: it would be stolen silently, and _serve_report would never get
+    # to report it as busy.
+    allow_reuse_address = not sys.platform.startswith("win")
+
+    def __init__(self, address: tuple[str, int], document: bytes) -> None:
+        self.document = document  # set first: super() binds and a request may then arrive
+        super().__init__(address, _ReportHandler)
+
+    def handle_error(self, request: object, client_address: object) -> None:
+        """A tab closed mid-response resets the connection; that is not news.
+
+        socketserver's default is to print the traceback, which would look like a
+        crash in the middle of an otherwise finished scan.
+        """
+
+
+def _serve_report(path: Path, port: int) -> None:
+    """Serve the report at ``http://localhost:<port>/`` until interrupted.
+
+    Over http:// the report is an ordinary page with a real origin, where a
+    ``file://`` URL is not: browsers deny local files module scripts, ``fetch``
+    and storage. Serving costs nothing here -- the scan is done, the report is on
+    disk -- so blocking until Ctrl+C is only the terminal's time, and a failure to
+    bind or to launch a browser is a message, not a non-zero exit.
+    """
+    try:
+        server = _ReportServer(("127.0.0.1", port), path.read_bytes())
+    except OSError as exc:
+        reason = exc.strerror or exc  # EADDRINUSE, typically: something else holds the port
+        print(f"skill-atlas: not serving the report on port {port}: {reason}", file=sys.stderr)
+        return
+
+    with server:
+        url = f"http://localhost:{server.server_address[1]}/"  # ask the socket: port 0 means "any"
+        print(f"Serving it at {url} (Ctrl+C to stop)")
+        _open_in_browser(url)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            print()  # the echoed ^C left the cursor mid-line; stopping is not an error
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -99,7 +177,11 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"where to write the HTML report (default: ./{DEFAULT_REPORT})",
     )
     scan.add_argument("--no-html", action="store_true", help="print to the terminal only")
-    scan.add_argument("--no-open", action="store_true", help="do not open the report in a browser")
+    scan.add_argument(
+        "--no-open",
+        action="store_true",
+        help="do not serve the report and open it in a browser",
+    )
     scan.set_defaults(func=cmd_scan)
 
     return parser
@@ -131,7 +213,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             return EXIT_ERROR
         print(f"\nReport written to {path.resolve()}")
         if _should_open(args):
-            _open_in_browser(path)
+            _serve_report(path, DEFAULT_PORT)
 
     return EXIT_OK
 

@@ -6,6 +6,35 @@ from pathlib import Path
 
 import pytest
 
+from skill_atlas import cli
+
+#: The real serving loop and the shipped port, captured before ``no_server_loop``
+#: replaces them for every test in the suite.
+REAL_SERVE_FOREVER = cli._ReportServer.serve_forever
+SHIPPED_DEFAULT_PORT = cli.DEFAULT_PORT
+
+
+@pytest.fixture(autouse=True)
+def no_server_loop(monkeypatch: pytest.MonkeyPatch) -> list[cli._ReportServer]:
+    """Bind a port for real, but record the server instead of serving until Ctrl+C.
+
+    Autouse, and here rather than beside the CLI tests, because forgetting it does not
+    fail a test -- it hangs the whole run. ``_serve_report`` waits for a Ctrl+C that no
+    suite will ever send, pytest prints nothing while it waits, and CI burns to its job
+    timeout. A module-local fixture would only cover the module it lives in, and the
+    next test to reach a browser-opening scan may not be written there.
+
+    Tests that want the real loop drive it through ``serving()`` in test_cli.py.
+
+    The default port also moves to 0 (any free one): 8888 is a popular choice for
+    whatever else a developer already has running, and a suite that goes red when it
+    is taken is testing the machine. The 8888 default is asserted on its own.
+    """
+    servers: list[cli._ReportServer] = []
+    monkeypatch.setattr(cli, "DEFAULT_PORT", 0)
+    monkeypatch.setattr(cli._ReportServer, "serve_forever", lambda self: servers.append(self))
+    return servers
+
 
 @pytest.fixture
 def make_repo(tmp_path: Path) -> Callable[[Mapping[str, str]], Path]:

@@ -25,3 +25,8 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# A blocking test prints nothing at all, and CI just stops until the job times out.
+# This dumps every thread's stack and names the test instead. Belt to the no_server_loop
+# braces in conftest: that fixture stops the one known way in, this catches the next one.
+# The suite runs in seconds, so a minute only elapses on a real hang.
+faulthandler_timeout = 60
