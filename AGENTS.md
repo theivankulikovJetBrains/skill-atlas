@@ -41,6 +41,16 @@ Sandboxes container, so two features can be developed at once without sharing a 
 a `.venv` or a `report.html`. Needs `sbx` (Docker Sandboxes) and a running JetBrains
 Central proxy.
 
+Run it from Git Bash. PowerShell has no handler for `.sh`, and a bare `bash` there resolves
+to the WSL shim in `WindowsApps`, where `cygpath` and `%LOCALAPPDATA%` are missing — so the
+script cannot locate `sbx.exe` and exits with `sbx not found`. From PowerShell, name the
+interpreter: `& 'C:\Program Files\Git\bin\bash.exe' scripts/sbx-feature.sh …`.
+
+An AI agent session does not need to wait for a human here: everything the launcher needs
+works from the agent's own Git Bash shell, so it can run `start -d <feature>` itself and go
+straight on to the work. `-d` is not optional for that — plain `start` ends in
+`exec sbx run`, an interactive attach with no terminal to attach to.
+
 | Task | Command |
 |---|---|
 | Start a feature and attach | `scripts/sbx-feature.sh start <feature>` |

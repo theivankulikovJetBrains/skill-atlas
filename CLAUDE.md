@@ -10,21 +10,29 @@ main checkout, so ignoring it produces a blocked tool call rather than a mess.
 
 1. `git worktree list`. If a worktree already exists for this task, call **EnterWorktree**
    with its `path` and work there.
-2. Otherwise ask the user to run it, because `sbx` is not on the agent's PATH and the
-   launcher needs the JetBrains Central proxy:
+2. Otherwise start it yourself — do not stop and wait for the user. Run this through the
+   **Bash** tool, which is Git Bash:
 
    ```
-   ! & 'C:\Program Files\Git\bin\bash.exe' scripts/sbx-feature.sh start -d <feature>
+   scripts/sbx-feature.sh start -d <feature>
    ```
 
-   Spell out the Git Bash binary. The session shell is PowerShell, which has no handler for
-   `.sh`, and a bare `bash` resolves to the WSL shim in `WindowsApps` — there `cygpath` and
-   `%LOCALAPPDATA%` are missing, so the launcher cannot find `sbx.exe` and dies. From a Git
-   Bash terminal, `scripts/sbx-feature.sh start -d <feature>` is enough.
+   `-d` is required. Without it the script ends in `exec sbx run`, an interactive attach that
+   has no terminal to attach to and hangs the tool call.
+
+   `sbx` not being on PATH is not a blocker: `find_sbx()` falls back to
+   `%LOCALAPPDATA%\DockerSandboxes\bin\sbx.exe`, and `central` — the other thing the launcher
+   needs — is on PATH already. Both work from the agent's shell.
+
+   Use the **Bash** tool, not **PowerShell**. PowerShell has no handler for `.sh`, and a bare
+   `bash` there resolves to the WSL shim in `WindowsApps`, where `cygpath` and `%LOCALAPPDATA%`
+   are missing, so `find_sbx()` cannot reach `sbx.exe` and the script dies. If you do need it
+   from the PowerShell side, spell the interpreter out:
+   `& 'C:\Program Files\Git\bin\bash.exe' scripts/sbx-feature.sh start -d <feature>`.
 
    The feature name becomes the branch, the sibling directory `../<feature>` and the sandbox
    name at once, so it is limited to 2+ characters of letters, digits, `.` or `-`, starting
-   with a letter or digit.
+   with a letter or digit. Derive one from the task rather than asking.
 3. Call **EnterWorktree** with `path: ../<feature>`, then do the work.
 
 Do not `git checkout -b` in the main checkout instead. A branch switch there carries every
