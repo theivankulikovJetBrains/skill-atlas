@@ -63,6 +63,12 @@ WIDTH, HEIGHT = 1280, 900
 #: still gets to report its own failure rather than having its stacks dumped.
 RENDER_TIMEOUT = 30.0
 
+#: What the one-off warm-up below is allowed, which is a different kind of wait: a first
+#: launch into a fresh profile builds the font cache and the profile itself, and on the CI
+#: runner that took longer than a whole frame is allowed. Generous because nothing is
+#: waiting on it and getting it wrong costs a red check for a browser that works.
+WARM_TIMEOUT = 180.0
+
 #: Where Edge is on the platforms this suite runs on: a developer's Windows box, a mac,
 #: and the GitHub runners. The Ubuntu runner image ships ``microsoft-edge``; the rest is
 #: covered by ``PATH`` below.
@@ -300,6 +306,61 @@ class Collector:
         # do: the report is a standalone document with no external assets (a check in
         # TestHtmlReport pins that), so there is nothing in the page to fetch, and the
         # four --disable flags below switch off the browser's own background chatter.
+        try:
+            done = self.launch(staged, png, RENDER_TIMEOUT)
+        except (OSError, subprocess.TimeoutExpired) as bad:
+            return self.give_up(f"{type(bad).__name__}: {bad}", staged)
+        if not png.exists():
+            # Say what the browser said. Without this the message is "no png" and
+            # nothing else, which is what made the first CI failure of this job a
+            # guessing game: the reason was on a stderr that was being thrown away.
+            noise = tail(done.stderr) or tail(done.stdout)
+            return self.give_up(
+                f"the browser exited {done.returncode} without writing a png; "
+                + (f"it said: {noise}" if noise else "it said nothing"),
+                staged,
+            )
+
+        if passed:
+            staged.unlink(missing_ok=True)  # only a red check's markup is worth keeping
+        self.shots.append(
+            Shot(self.seq, test, label, passed, png.name, source)
+        )
+        return str(png)
+
+    def warm(self) -> None:
+        """Pay the browser's one-off start-up cost before any check is being timed.
+
+        A first launch into a fresh ``--user-data-dir`` builds the profile and the font
+        cache, and on the CI runner that took longer than the 30 seconds a frame is
+        allowed: the first check of the session failed on a timeout while all thirty
+        after it rendered in about a second each. Doing it here also keeps that cost
+        outside any test, and so clear of the per-test ``faulthandler_timeout`` in
+        pyproject.toml.
+
+        Best-effort on purpose. This is an optimisation, not a check: a browser that is
+        genuinely broken gets reported by the first real capture, with its own stderr
+        attached, rather than by a failure in a session hook that no test can explain.
+        """
+        if not self.enabled:
+            return
+        probe, shot = self.staging / "warm-up.html", self.staging / "warm-up.png"
+        probe.write_text(
+            "<!DOCTYPE html><title>warm-up</title><p>Starting the browser once, so the "
+            "first check of the session is timed like every other one.",
+            encoding="utf-8",
+        )
+        try:
+            self.launch(probe, shot, WARM_TIMEOUT)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        probe.unlink(missing_ok=True)
+        shot.unlink(missing_ok=True)
+
+    def launch(self, source: Path, png: Path, timeout: float) -> subprocess.CompletedProcess[str]:
+        """One headless render. Shared by the warm-up and by every real frame, so the
+        flags cannot drift apart between the launch that proves the browser works and
+        the launches that do the work."""
         argv = [
             self.browser,
             "--headless",
@@ -322,31 +383,11 @@ class Collector:
             "--virtual-time-budget=4000",
             f"--screenshot={png}",
             *self.sandbox_flags(),
-            staged.as_uri(),
+            source.as_uri(),
         ]
-        try:
-            done = subprocess.run(
-                argv, capture_output=True, text=True, errors="replace", timeout=RENDER_TIMEOUT
-            )
-        except (OSError, subprocess.TimeoutExpired) as bad:
-            return self.give_up(f"{type(bad).__name__}: {bad}", staged)
-        if not png.exists():
-            # Say what the browser said. Without this the message is "no png" and
-            # nothing else, which is what made the first CI failure of this job a
-            # guessing game: the reason was on a stderr that was being thrown away.
-            noise = tail(done.stderr) or tail(done.stdout)
-            return self.give_up(
-                f"the browser exited {done.returncode} without writing a png; "
-                + (f"it said: {noise}" if noise else "it said nothing"),
-                staged,
-            )
-
-        if passed:
-            staged.unlink(missing_ok=True)  # only a red check's markup is worth keeping
-        self.shots.append(
-            Shot(self.seq, test, label, passed, png.name, source)
+        return subprocess.run(
+            argv, capture_output=True, text=True, errors="replace", timeout=timeout
         )
-        return str(png)
 
     def sandbox_flags(self) -> tuple[str, ...]:
         """``--no-sandbox`` on Linux, and as root anywhere.

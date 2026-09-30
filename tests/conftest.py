@@ -71,6 +71,12 @@ def pytest_configure(config: pytest.Config) -> None:
     config.stash[COLLECTOR] = Collector.from_config(config)
 
 
+def pytest_sessionstart(session: pytest.Session) -> None:
+    # Start the browser once here, where nothing is being timed, rather than inside
+    # whichever test happens to take the first screenshot. See Collector.warm().
+    session.config.stash[COLLECTOR].warm()
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     collector = session.config.stash.get(COLLECTOR, None)
     if collector is None:
