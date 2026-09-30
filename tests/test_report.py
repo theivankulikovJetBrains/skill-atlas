@@ -125,6 +125,52 @@ class TestHtmlReport:
         assert "src=" not in html  # no external assets to fetch
 
 
+class TestHtmlSearch:
+    """The report's search box, which narrows the table to names matching what is typed.
+
+    The narrowing itself is the browser's job and no browser runs in this suite, so what
+    is pinned here is the contract the script depends on: the box, the per-row name it
+    matches against, and the empty state it reveals.
+    """
+
+    def test_a_populated_report_offers_a_search_box(self, tmp_path: Path):
+        html = write_html(result(ALPHA, BRAVO), tmp_path / "r.html").read_text(encoding="utf-8")
+        assert 'type="search"' in html
+        assert 'aria-label="Search skills by name"' in html
+
+    def test_the_box_ships_hidden_for_readers_without_javascript(self, tmp_path: Path):
+        html = write_html(result(ALPHA), tmp_path / "r.html").read_text(encoding="utf-8")
+        assert '<div class="search" role="search" hidden>' in html
+        assert "box.hidden = false" in html  # ... and the script is what reveals it
+
+    def test_the_filter_script_is_inline(self, tmp_path: Path):
+        html = write_html(result(ALPHA), tmp_path / "r.html").read_text(encoding="utf-8")
+        assert "<script>" in html
+        assert "addEventListener('input'" in html
+
+    def test_every_row_carries_the_name_it_is_matched_on(self, tmp_path: Path):
+        html = write_html(result(ALPHA, BRAVO), tmp_path / "r.html").read_text(encoding="utf-8")
+        assert '<tr data-name="alpha">' in html
+        assert '<tr data-name="bravo">' in html
+
+    def test_a_name_cannot_break_out_of_the_data_attribute(self, tmp_path: Path):
+        skill = Skill('say "hi" & run', "d", "SKILL.md")
+        html = write_html(result(skill), tmp_path / "r.html").read_text(encoding="utf-8")
+        assert 'say "hi"' not in html
+        assert "data-name=" in html
+        assert "&#34;" in html or "&quot;" in html
+
+    def test_a_hidden_empty_state_waits_for_a_query_that_matches_nothing(self, tmp_path: Path):
+        html = write_html(result(ALPHA), tmp_path / "r.html").read_text(encoding="utf-8")
+        assert '<tr class="no-matches" hidden>' in html
+        assert "No skill name contains" in html
+
+    def test_an_empty_scan_has_nothing_to_search(self, tmp_path: Path):
+        html = write_html(result(), tmp_path / "r.html").read_text(encoding="utf-8")
+        assert 'type="search"' not in html
+        assert "<script>" not in html
+
+
 class TestDuplicateSkills:
     """Copies of one skill must stay individually visible -- the drift is the finding."""
 
