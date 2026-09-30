@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import sys
 import unicodedata
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,27 @@ from skill_atlas import cli
 #: replaces them for every test in the suite.
 REAL_SERVE_FOREVER = cli._ReportServer.serve_forever
 SHIPPED_DEFAULT_PORT = cli.DEFAULT_PORT
+
+
+@pytest.fixture(autouse=True)
+def intact_stdio() -> Iterator[None]:
+    """Hand the next test a usable ``sys.stdout``, whoever swapped it out.
+
+    A test that takes ``capsys`` *and* replaces ``sys.stdout`` itself leaves a closed
+    stream behind: ``capsys`` installs its ``CaptureIO`` during setup, so that object
+    is what ``monkeypatch`` saves as the original, and the two tear down in the order
+    that puts it back after ``capsys`` has closed it. The next ``print`` outside
+    ``capsys`` then raises ``ValueError: I/O operation on closed file``.
+
+    Normally invisible, because the capture plugin reinstalls ``sys.stdout`` before
+    every test. Run with ``-s`` and nothing does -- which is how a suite that is green
+    on CI goes red the moment a developer debugs it.
+
+    Declared first and autouse so it tears down last, after both of them.
+    """
+    streams = (sys.stdout, sys.stderr)
+    yield
+    sys.stdout, sys.stderr = streams
 
 
 @pytest.fixture(autouse=True)
@@ -34,6 +56,30 @@ def no_server_loop(monkeypatch: pytest.MonkeyPatch) -> list[cli._ReportServer]:
     monkeypatch.setattr(cli, "DEFAULT_PORT", 0)
     monkeypatch.setattr(cli._ReportServer, "serve_forever", lambda self: servers.append(self))
     return servers
+
+
+@pytest.fixture(autouse=True)
+def opened(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record what the CLI hands to the browser instead of launching one.
+
+    Autouse for the same reason as ``no_server_loop``, and with a worse failure mode:
+    forgetting it does not go red, it opens a tab on the developer's own machine. A
+    scan only skips the browser when ``sys.stdout`` is not a terminal, which under
+    pytest is true by accident -- the capture plugin's doing. Run the suite with ``-s``,
+    or from a runner that leaves stdout attached, and every plain ``cli.main(["scan",
+    ...])`` reaches ``webbrowser.open`` for real; on Windows and macOS ``_has_display()``
+    never says otherwise.
+
+    Patched on the :mod:`webbrowser` module rather than on ``cli``, so the sibling
+    entry points (``open_new``, ``open_new_tab``) that call it through the module
+    global are stopped too.
+
+    Tests that need the call to fail replace it again in their own body; the last
+    ``setattr`` wins, and monkeypatch unwinds both.
+    """
+    urls: list[str] = []
+    monkeypatch.setattr(cli.webbrowser, "open", lambda url, *_a, **_kw: urls.append(url) or True)
+    return urls
 
 
 @pytest.fixture
