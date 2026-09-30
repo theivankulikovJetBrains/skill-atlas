@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import fnmatch
 import json
 import os
 import queue
@@ -214,6 +215,314 @@ def check_ignored(out: Path, project: Path) -> None:
               file=sys.stderr)
 
 
+# --------------------------------------------------------------------------- scope
+
+
+#: Everything a scenario can be about. A scenario declares the topics it exercises, a changed
+#: file maps to the topics it can move, and a scoped run films where the two meet. The
+#: vocabulary stays small on purpose: finer topics mean a mapping nobody maintains, and a
+#: mapping that has drifted narrows a run silently -- the one failure mode that matters here,
+#: because a scenario that was never filmed looks exactly like a scenario that passed.
+TOPICS = ("cli", "repo", "scanner", "similarity", "console", "report", "template",
+          "search", "compare", "groups", "server")
+ALL_TOPICS = frozenset(TOPICS)
+
+SPEC = "spec/cli.md"
+
+#: What a changed file can move, keyed by the repo-relative POSIX path `git diff --name-only`
+#: prints. First match wins, so the specific patterns come before the directory-wide ones. A
+#: path that matches nothing widens the run to everything rather than narrowing it: an
+#: unmapped file is one we know nothing about, and reading that as "affects no scenario" would
+#: quietly drop the scenario it broke.
+PATH_TOPICS: tuple[tuple[str, frozenset[str]], ...] = (
+    ("src/skill_atlas/cli.py", frozenset({"cli", "server", "report"})),
+    ("src/skill_atlas/repo.py", frozenset({"repo"})),
+    ("src/skill_atlas/scanner.py", frozenset({"scanner"})),
+    # The pair scores are computed during the scan and travel inside the report, so the
+    # comparison and the group cards move when the scoring does.
+    ("src/skill_atlas/similarity.py", frozenset({"similarity", "groups", "compare"})),
+    ("src/skill_atlas/report.py", frozenset({"console", "report", "template"})),
+    ("src/skill_atlas/templates/*",
+     frozenset({"report", "template", "search", "compare", "groups"})),
+    # models.py is the vocabulary every stage shares, and uv.lock moves jinja2 or pyyaml
+    # under all of them: nothing downstream of either is safe to leave out.
+    ("src/skill_atlas/models.py", ALL_TOPICS),
+    ("uv.lock", ALL_TOPICS),
+    ("src/skill_atlas/__init__.py", frozenset({"cli"})),  # holds __version__
+    ("pyproject.toml", frozenset({"cli"})),  # the entry point and the version
+    # The harness itself. A change here can move any frame, so a scoped run of a change to
+    # this script is a full run -- which is the honest answer, not a shortcut worth taking.
+    (".claude/skills/demo-video/*", ALL_TOPICS),
+    # Nothing here changes what the app does when a user runs it. The suite pins the same
+    # behaviour from the inside, and a workflow, an IDE file or a prose file moves no scenario.
+    ("tests/*", frozenset()),
+    (".github/*", frozenset()),
+    (".claude/*", frozenset()),
+    (".idea/*", frozenset()),
+    ("scripts/*", frozenset()),
+    ("AGENTS.md", frozenset()),
+    ("CLAUDE.md", frozenset()),
+    ("README.md", frozenset()),
+    (".gitignore", frozenset()),
+    (".gitattributes", frozenset()),
+)
+
+#: `spec/cli.md` section by section, because Definition of Done step 4 puts a spec change in
+#: very nearly every branch -- treating the contract as one unit would leave a scoped run
+#: selecting everything, every time, and the flag would do nothing. Keys are the file's own
+#: headings. One that is not here widens the run and says which, so a renamed or a new section
+#: announces itself instead of silently mapping to nothing.
+SPEC_TOPICS: dict[str, frozenset[str]] = {
+    "Skill Atlas": frozenset(),  # the title and the one-line description above `## Usage`
+    "Usage": frozenset({"cli"}),
+    "Detection": frozenset({"scanner"}),
+    "Similar skills": frozenset({"similarity", "groups"}),
+    "Comparing skills by hand": frozenset({"compare"}),
+    "Output": frozenset({"console", "report", "template", "search", "server"}),
+    "Exit codes": frozenset({"cli"}),
+    "Fetch": frozenset({"repo"}),
+    "Requirements": frozenset({"cli"}),
+    "CI": frozenset(),
+}
+
+#: Which scan writes the report a UI step is driven against. A scoped run that selects a UI
+#: scenario has to run that scan whatever the diff touched: the frame is driven against a
+#: report on disk, and without its scan there is nothing there to drive. UI_FALLBACK's
+#: stand-in is pinned alongside it, so an --offline run still has a report to film.
+REPORT_PRODUCER = {
+    "atlas": "CLI-02", "loose": "CLI-07", "plain": "CLI-08",
+    "barren": "CLI-09", "bulk": "CLI-10", "public": "CLI-11",
+}
+
+#: Scenarios that read what an earlier one left behind: the topics that select them, and what
+#: they need pinned in. Both live here because the pin has to be settled before the list starts
+#: running, while the scan being pinned is still ahead of it -- and because writing the topics
+#: in two places is how the two copies come to disagree.
+SCENARIO_NEEDS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    # CLI-16 asserts that nothing opened a browser across every scan above it, which is
+    # vacuously true when no scan ran at all.
+    "CLI-16": (("cli", "server"), ("CLI-02",)),
+}
+
+
+@dataclasses.dataclass
+class Scope:
+    """Which scenarios this run films, and the diff that decided it.
+
+    Unscoped -- no `--diff`, no `--pr` -- every scenario is in and `wants()` is a formality.
+    Scoped, a scenario is in when the diff's topics reach it, or when something else that is
+    in needs it (`pinned`). What is left out is kept in `declined` rather than forgotten: a
+    subset run that does not say what it skipped reads as a full green run, which is the
+    claim this whole script exists to avoid making falsely.
+    """
+
+    scoped: bool = False
+    rev_range: str = ""
+    label: str = ""  # "PR #5" or the rev range, as the film should name it
+    detail: str = ""  # the merge request's title, when we know it
+    files: tuple[str, ...] = ()
+    topics: frozenset[str] = ALL_TOPICS
+    mapped: tuple[tuple[str, tuple[str, ...]], ...] = ()  # what each change mapped to
+    widened: tuple[str, ...] = ()  # why the scope ended up wider than the diff
+    pinned: frozenset[str] = frozenset()
+    declined: list[tuple[str, str]] = dataclasses.field(default_factory=list)
+
+    def reaches(self, topics: tuple[str, ...]) -> bool:
+        """Whether the diff gets to these topics. Decides nothing and records nothing."""
+        return not self.scoped or bool(self.topics & set(topics))
+
+    def wants(self, sid: str, caption: str, topics: tuple[str, ...]) -> bool:
+        if sid in self.pinned or self.reaches(topics):
+            return True
+        self.declined.append((sid, caption))
+        return False
+
+    def pin(self, ids: set[str]) -> None:
+        self.pinned = self.pinned | frozenset(ids)
+
+    @property
+    def empty(self) -> bool:
+        return self.scoped and not self.topics and not self.pinned
+
+
+def git_out(project: Path, *args: str, fatal: bool = True) -> str:
+    try:
+        done = subprocess.run(["git", *args], cwd=str(project), capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=300)
+    except (OSError, subprocess.TimeoutExpired) as bad:
+        if fatal:
+            die(f"git {' '.join(args)} failed: {bad}")
+        return ""
+    if done.returncode != 0:
+        if fatal:
+            die(f"git {' '.join(args)} failed: {done.stderr.strip() or done.returncode}")
+        return ""
+    return done.stdout
+
+
+def default_range(project: Path) -> str:
+    """`--diff` with no range: this branch against wherever the pull request will be based.
+
+    `origin/main` before local `main` on purpose. A feature worktree's local `main` is
+    whatever it was when the worktree was made, and a stale one puts commits that are already
+    on the base branch into the diff -- which widens the scope to scenarios this branch never
+    touched.
+    """
+    for base in ("origin/HEAD", "origin/main", "main"):
+        if git_out(project, "rev-parse", "--verify", "--quiet", base, fatal=False).strip():
+            return f"{base}...HEAD"
+    die("could not work out a base to diff against (no origin/HEAD, origin/main or main); "
+        "pass a range, e.g. --diff <base>...HEAD")
+    raise AssertionError  # unreachable: die raises
+
+
+def changed_files(project: Path, rev_range: str) -> list[str]:
+    """The diff's file list. --no-renames so a moved file maps through both of its paths."""
+    out = git_out(project, "diff", "--name-only", "--no-renames", rev_range)
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def spec_sections(project: Path, rev_range: str) -> list[str]:
+    """Which headings of `spec/cli.md` the diff changes something under.
+
+    The whole file is asked for as context (`-U100000`) and walked top to bottom, so every
+    changed line is attributed to the heading above it without reading the file from disk as
+    well -- which would be the wrong copy anyway for a range that does not end at HEAD. A
+    heading that is itself removed counts as a change to its own section: a section being
+    renamed or deleted is exactly the case where the old topics still need filming.
+    """
+    out = git_out(project, "diff", "-U100000", "--no-color", rev_range, "--", SPEC)
+    heading = re.compile(r"^([+\- ])(#{1,2}) +(.+?)\s*$")
+    seen: list[str] = []
+    current = ""
+    started = False
+    for line in out.splitlines():
+        if not started:
+            started = line.startswith("@@")
+            continue
+        if line.startswith(("+++", "---", "@@", "\\")):
+            continue
+        if match := heading.match(line):
+            current = match.group(3)
+            if match.group(1) == "-" and current not in seen:
+                seen.append(current)
+            continue
+        if line[:1] in "+-" and current not in seen:
+            seen.append(current)
+    return seen
+
+
+def path_topics(name: str) -> frozenset[str] | None:
+    for pattern, topics in PATH_TOPICS:
+        if fnmatch.fnmatchcase(name, pattern):
+            return topics
+    return None
+
+
+def resolve_scope(project: Path, rev_range: str, label: str, detail: str = "") -> Scope:
+    files = changed_files(project, rev_range)
+    topics: set[str] = set()
+    mapped: list[tuple[str, tuple[str, ...]]] = []
+    widened: list[str] = []
+
+    def take(what: str, known: frozenset[str] | None, why: str) -> None:
+        nonlocal topics
+        if known is None:
+            widened.append(why)
+            known = ALL_TOPICS
+        topics |= known
+        mapped.append((what, tuple(sorted(known)) or ("(nothing)",)))
+
+    for name in files:
+        if name != SPEC:
+            take(name, path_topics(name), f"{name} is in no PATH_TOPICS pattern")
+            continue
+        sections = spec_sections(project, rev_range)
+        if not sections:
+            take(SPEC, None, f"{SPEC} changed but no section could be read from the diff")
+        for section in sections:
+            take(f"{SPEC} — {section}", SPEC_TOPICS.get(section),
+                 f"{SPEC} section {section!r} is not in SPEC_TOPICS")
+
+    return Scope(scoped=True, rev_range=rev_range, label=label, detail=detail,
+                 files=tuple(files), topics=frozenset(topics), mapped=tuple(mapped),
+                 widened=tuple(widened))
+
+
+# --------------------------------------------------------------------------- merge requests
+
+
+def origin_slug(project: Path) -> str | None:
+    url = git_out(project, "remote", "get-url", "origin", fatal=False).strip()
+    match = re.search(r"github\.com[:/]+([^/]+/[^/]+?)(?:\.git)?/?$", url)
+    return match.group(1) if match else None
+
+
+def github_token(project: Path) -> str:
+    """The token Git Credential Manager already holds for github.com.
+
+    The same route AGENTS.md uses to open the pull request, and for the same reason: `gh` is
+    not installed and an unauthenticated call from this network gets a rate-limit 403 rather
+    than an answer. GIT_TERMINAL_PROMPT/GCM_INTERACTIVE keep the helper from opening a GUI
+    prompt when the credential is missing -- without them this hangs instead of failing.
+    """
+    try:
+        done = subprocess.run(
+            ["git", "credential", "fill"],
+            cwd=str(project), input="protocol=https\nhost=github.com\n\n",
+            capture_output=True, text=True, timeout=60,
+            env=dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never"),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    for line in done.stdout.splitlines():
+        if line.startswith("password="):
+            return line[len("password="):].strip()
+    return ""
+
+
+def merge_request_scope(project: Path, number: int) -> Scope:
+    """Scope the run to one merge request, by number.
+
+    The diff is computed locally, not read from the API: GitHub publishes every pull request
+    head as `refs/pull/<n>/head`, so one fetch puts the branch in this repository and the
+    range is then an ordinary `git diff` -- which is what lets the spec be read section by
+    section instead of file by file. The API is asked only for the metadata that makes the
+    film name the right thing (the base branch and the title), and a failure there costs a
+    note on stderr rather than the run.
+    """
+    slug = origin_slug(project)
+    base, title = "", ""
+    if slug and (token := github_token(project)):
+        request = urllib.request.Request(
+            f"https://api.github.com/repos/{slug}/pulls/{number}",
+            headers={"Authorization": f"Bearer {token}",
+                     "Accept": "application/vnd.github+json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as answer:
+                payload = json.load(answer)
+            base, title = payload["base"]["ref"], payload.get("title", "")
+        except Exception as bad:  # noqa: BLE001 -- any failure here is the same fallback
+            print(f"record_demo: could not read pull request {number} from the API ({bad}); "
+                  f"falling back to a diff against main", file=sys.stderr)
+    if not base:
+        base = "main"
+
+    # A named ref rather than FETCH_HEAD: every feature worktree shares one .git, so two runs
+    # at once would overwrite each other's FETCH_HEAD between the fetch and the diff.
+    ref = f"refs/demo-run/pull/{number}"
+    git_out(project, "fetch", "--quiet", "origin", f"+refs/pull/{number}/head:{ref}")
+    for candidate in (f"origin/{base}", base):
+        if git_out(project, "rev-parse", "--verify", "--quiet", candidate, fatal=False).strip():
+            base = candidate
+            break
+    else:
+        die(f"pull request {number} is based on {base}, which is not in this repository; "
+            f"fetch it or pass an explicit --diff range")
+    return resolve_scope(project, f"{base}...{ref}", f"PR #{number}", title)
+
+
 # --------------------------------------------------------------------------- fixtures
 
 
@@ -324,10 +633,12 @@ def build_fixtures(root: Path) -> dict[str, Path]:
 class Driver:
     """Runs the app the way a user does -- through `uv run` -- and keeps the evidence."""
 
-    def __init__(self, project: Path, work: Path, timeout: float) -> None:
+    def __init__(self, project: Path, work: Path, timeout: float, scope: Scope) -> None:
         self.project = project
         self.work = work
         self.timeout = timeout
+        self.scope = scope
+        self.runs = 0  # how many actually ran, which is what CLI-16 needs to mean anything
         self.reports: dict[str, Path] = {}
         # Python's webbrowser honours $BROWSER on every platform, so pointing it at a recorder
         # proves the open happened -- and which URL it was handed -- without a real tab landing
@@ -362,6 +673,7 @@ class Driver:
 
     def run(self, *args: str) -> tuple[int, str, str, float]:
         started = time.monotonic()
+        self.runs += 1
         try:
             done = subprocess.run(
                 self.argv(*args),
@@ -390,6 +702,7 @@ def scenario_from_run(
     driver: Driver,
     args: list[str],
     *,
+    topics: tuple[str, ...],
     rc: int = 0,
     stdout_has: tuple[str, ...] = (),
     stdout_lacks: tuple[str, ...] = (),
@@ -399,7 +712,9 @@ def scenario_from_run(
     html_has: tuple[str, ...] = (),
     html_lacks: tuple[str, ...] = (),
     remember: str | None = None,
-) -> Scenario:
+) -> Scenario | None:
+    if not driver.scope.wants(sid, caption, topics):
+        return None
     if writes is not None and writes.exists():
         writes.unlink()  # a stale report can make every assertion pass against nothing
     code, out, err, seconds = driver.run(*args)
@@ -434,14 +749,20 @@ def cli_scenarios(driver: Driver, fixtures: dict[str, Path], repo_url: str | Non
     atlas = fixtures["atlas"].as_uri()
     steps: list[Scenario] = []
 
-    steps.append(
+    def keep(step: Scenario | None) -> None:
+        """A scoped run leaves gaps in this list; the scope remembers what it declined."""
+        if step is not None:
+            steps.append(step)
+
+    keep(
         scenario_from_run("CLI-01", "--version prints the version and stops", driver,
-                          ["--version"], stdout_has=("skill-atlas",))
+                          ["--version"], topics=("cli",), stdout_has=("skill-atlas",))
     )
-    steps.append(
+    keep(
         scenario_from_run(
             "CLI-02", "A plain scan: skills on the console, report on disk", driver,
             ["scan", atlas, "-o", str(reports / "atlas.html"), "--no-open"],
+            topics=("cli", "scanner", "console", "report"),
             stdout_has=("Found 8 skills", "deploy", "skills/build-and-test/SKILL.md",
                         "Similar skills", "Report written to"),
             writes=reports / "atlas.html",
@@ -449,54 +770,60 @@ def cli_scenarios(driver: Driver, fixtures: dict[str, Path], repo_url: str | Non
             remember="atlas",
         )
     )
-    steps.append(
+    keep(
         scenario_from_run(
             "CLI-03", "Malformed frontmatter is flagged, never dropped", driver,
             ["scan", atlas, "-o", str(reports / "flagged.html"), "--no-open"],
+            topics=("scanner", "console", "report"),
             stdout_has=("adrift", "mangled"),
             writes=reports / "flagged.html",
             html_has=("adrift", "mangled"),
         )
     )
-    steps.append(
+    keep(
         scenario_from_run(
             "CLI-04", "--ref scans a tag instead of the default branch", driver,
             ["scan", atlas, "--ref", "v0.1", "-o", str(reports / "tagged.html"), "--no-open"],
+            topics=("repo", "cli"),
             stdout_has=("Found 2 skills", "build-and-test"),
             stdout_lacks=("deploy-staging",),
             writes=reports / "tagged.html",
         )
     )
-    steps.append(
+    keep(
         scenario_from_run(
             "CLI-05", "--no-html: the console alone, nothing written", driver,
             ["scan", atlas, "-o", str(reports / "never.html"), "--no-html", "--no-open"],
+            topics=("cli", "report", "console"),
             stdout_has=("Found 8 skills",),
             stdout_lacks=("Report written",),
             absent=reports / "never.html",
         )
     )
-    steps.append(
+    keep(
         scenario_from_run(
             "CLI-06", "--similarity 0.9 wants near-identity, and finds the vendored copy", driver,
             ["scan", atlas, "--similarity", "0.9", "-o", str(reports / "strict.html"), "--no-open"],
+            topics=("similarity", "groups", "console"),
             stdout_has=("Found 8 skills", "100%"),
             writes=reports / "strict.html",
         )
     )
-    steps.append(
+    keep(
         scenario_from_run(
             "CLI-07", "--similarity 0.2 groups anything that rhymes", driver,
             ["scan", atlas, "--similarity", "0.2", "-o", str(reports / "loose.html"), "--no-open"],
+            topics=("similarity", "groups", "console"),
             stdout_has=("Similar skills",),
             writes=reports / "loose.html",
             remember="loose",
         )
     )
-    steps.append(
+    keep(
         scenario_from_run(
             "CLI-08", "--no-similar drops the groups and the comparison", driver,
             ["scan", atlas, "--no-similar", "-o", str(reports / "plain.html"), "--no-open"],
+            topics=("similarity", "groups", "compare", "report"),
             stdout_has=("Found 8 skills",),
             stdout_lacks=("Similar skills",),
             writes=reports / "plain.html",
@@ -504,20 +831,22 @@ def cli_scenarios(driver: Driver, fixtures: dict[str, Path], repo_url: str | Non
             remember="plain",
         )
     )
-    steps.append(
+    keep(
         scenario_from_run(
             "CLI-09", "A repo with no skills is a success, not an error", driver,
             ["scan", fixtures["barren"].as_uri(), "-o", str(reports / "barren.html"), "--no-open"],
+            topics=("scanner", "console", "report", "search"),
             stdout_has=("No skills found",),
             writes=reports / "barren.html",
             html_lacks=('class="search"',),  # no rows to filter, so no search box
             remember="barren",
         )
     )
-    steps.append(
+    keep(
         scenario_from_run(
             "CLI-10", "Past 200 skills the comparison is left out; groups stay", driver,
             ["scan", fixtures["bulk"].as_uri(), "-o", str(reports / "bulk.html"), "--no-open"],
+            topics=("similarity", "compare", "report"),
             stdout_has=("Found 201 skills",),
             writes=reports / "bulk.html",
             html_has=("skill-200",),
@@ -526,69 +855,83 @@ def cli_scenarios(driver: Driver, fixtures: dict[str, Path], repo_url: str | Non
         )
     )
     if repo_url:
-        steps.append(
+        keep(
             scenario_from_run(
                 "CLI-11", "The real thing: a public repository over the network", driver,
                 ["scan", repo_url, "-o", str(reports / "public.html"), "--no-open"],
+                topics=("repo", "scanner", "report"),
                 stdout_has=("Scanned", "Found "),
                 writes=reports / "public.html",
                 html_has=("<title>Skill Atlas", "https://github.com"),
                 remember="public",
             )
         )
-    steps.append(
+    keep(
         scenario_from_run(
             "CLI-12", "A repository that is not there: exit 1", driver,
             ["scan", (driver.work / "no-such-repo").as_uri(), "-o", str(reports / "nope.html"),
              "--no-open"],
+            topics=("repo", "cli"),
             rc=1, absent=reports / "nope.html",
         )
     )
-    steps.append(
+    keep(
         scenario_from_run(
             "CLI-13", "--similarity outside 0-1 is a usage error: exit 2", driver,
             ["scan", atlas, "--similarity", "5", "--no-open"],
+            topics=("cli", "similarity"),
             rc=2, stderr_has=("outside the range 0-1",),
         )
     )
-    steps.append(
+    keep(
         scenario_from_run(
             "CLI-14", "--port outside 0-65535 is caught before the scan: exit 2", driver,
             ["scan", atlas, "--port", "99999", "--no-open"],
+            topics=("cli", "server"),
             rc=2, stderr_has=("outside the port range",),
         )
     )
-    steps.append(
+    keep(
         scenario_from_run(
             "CLI-15", "An unwritable report is exit 1, after the scan has printed", driver,
             ["scan", atlas, "-o", str(driver.work / "reports"), "--no-open"],
+            topics=("cli", "report"),
             rc=1, stdout_has=("Found 8 skills",),
         )
     )
-    steps.append(piped_scenario(driver))
-    steps.append(served_scenario(driver))
-    steps.append(busy_port_scenario(driver))
+    keep(piped_scenario(driver))
+    keep(served_scenario(driver))
+    keep(busy_port_scenario(driver))
     return steps
 
 
-def piped_scenario(driver: Driver) -> Scenario:
+def piped_scenario(driver: Driver) -> Scenario | None:
     """Every run above was captured through a pipe, so none of them may have opened a tab.
 
     This is the one scenario with no command of its own: it reads the recorder that all of
     them shared. The rule it checks -- no browser and no wait when stdout is not a terminal --
     is what keeps the tool usable in CI, and a regression would hang a pipeline rather than
     fail it.
+
+    Which is also why it counts the runs: "nothing opened a browser" is true for free when
+    nothing ran, and a scoped run is exactly the case where that could happen. SCENARIO_NEEDS
+    pins a scan in to keep the claim standing on something, and the count is the assertion
+    that the pin worked.
     """
-    step = Scenario("CLI-16", "Piped or in CI: no server, no browser, no hanging",
-                    "(every scan above ran with stdout on a pipe)")
+    caption = "Piped or in CI: no server, no browser, no hanging"
+    if not driver.scope.wants("CLI-16", caption, SCENARIO_NEEDS["CLI-16"][0]):
+        return None
+    step = Scenario("CLI-16", caption, "(every run above had stdout on a pipe)")
     quiet = not driver.opened.exists()
+    step.checks.append(Check("runs that went through a pipe", str(driver.runs),
+                             "at least one", driver.runs > 0))
     step.checks.append(Check("browser left alone for piped runs", str(quiet), "True", quiet))
-    step.output = ("Nothing invoked $BROWSER across every scan above.\n"
+    step.output = (f"Nothing invoked $BROWSER across the {driver.runs} runs above.\n"
                    "stdout was a pipe, so the report was written and the process exited.")
     return step
 
 
-def served_scenario(driver: Driver) -> Scenario:
+def served_scenario(driver: Driver) -> Scenario | None:
     """The serve-and-open path, which only happens when stdout is a terminal.
 
     CREATE_NO_WINDOW is what makes this testable from an agent's shell: the child gets a real
@@ -596,12 +939,14 @@ def served_scenario(driver: Driver) -> Scenario:
     catches the open instead of a browser. Elsewhere the same effect needs a pty, so on
     non-Windows the run is started in its own session with a pty if one can be had.
     """
+    caption = "Served on 127.0.0.1 and opened in the browser"
+    if not driver.scope.wants("CLI-17", caption, ("server", "cli")):
+        return None
     port = free_port()
     report = driver.work / "reports" / "served.html"
     atlas_uri = (driver.work / "fixtures" / "atlas").as_uri()
     argv = driver.argv("scan", atlas_uri, "--port", str(port), "-o", str(report))
-    step = Scenario("CLI-17", "Served on 127.0.0.1 and opened in the browser",
-                    f"skill-atlas scan <repo> --port {port} -o served.html")
+    step = Scenario("CLI-17", caption, f"skill-atlas scan <repo> --port {port} -o served.html")
     driver.opened.unlink(missing_ok=True)
 
     kwargs: dict[str, object] = {}
@@ -665,8 +1010,11 @@ def served_scenario(driver: Driver) -> Scenario:
     return step
 
 
-def busy_port_scenario(driver: Driver) -> Scenario:
+def busy_port_scenario(driver: Driver) -> Scenario | None:
     """A port already taken is a message on stderr, not a failure: the report is on disk."""
+    caption = "A port already in use costs a warning, not the report"
+    if not driver.scope.wants("CLI-18", caption, ("server",)):
+        return None
     report = driver.work / "reports" / "busy.html"
     report.unlink(missing_ok=True)
     with socket.socket() as squatter:
@@ -676,8 +1024,7 @@ def busy_port_scenario(driver: Driver) -> Scenario:
         code, out, err, seconds = driver.run(
             "scan", (driver.work / "fixtures" / "atlas").as_uri(), "--port", str(port), "-o", str(report)
         )
-    step = Scenario("CLI-18", "A port already in use costs a warning, not the report",
-                    f"skill-atlas scan <repo> --port {port} -o busy.html",
+    step = Scenario("CLI-18", caption, f"skill-atlas scan <repo> --port {port} -o busy.html",
                     out or err, seconds=seconds)
     step.checks.append(Check("exit code", str(code), "0", code == 0))
     step.checks.append(Check("report still written", str(report.exists()), "True", report.exists()))
@@ -818,6 +1165,7 @@ class UiStep:
     caption: str
     report: str  # key into Driver.reports
     body: str  # JavaScript, run against `ui`
+    topics: tuple[str, ...]  # which parts of the app this step is about; see TOPICS
     duration: float = 2.4
     strip_script: bool = False
     dark: bool = False
@@ -827,7 +1175,7 @@ def ui_steps() -> list[UiStep]:
     """The report's own behaviour, as spec/cli.md describes it, one step per claim."""
     return [
         UiStep("UI-01", "The report opens with every skill listed and the search box focused",
-               "public", """
+               "public", topics=("template", "search", "compare"), body="""
         ui.ok('rows listed', ui.rows().length > 0, true);
         ui.ok('all rows visible', ui.shown().length, ui.rows().length);
         ui.ok('search box shown', ui.q('.search').hidden, false);
@@ -835,7 +1183,8 @@ def ui_steps() -> list[UiStep]:
         ui.ok('compare button offered', ui.q('.compare-btn').hidden, false);
         ui.ok('nothing ticked yet, so it is disabled', ui.q('.compare-btn').disabled, true);
         """, duration=3.0),
-        UiStep("UI-02", "Typing narrows the table keystroke by keystroke", "public", """
+        UiStep("UI-02", "Typing narrows the table keystroke by keystroke", "public",
+               topics=("search",), body="""
         // Taken from the first row rather than written in, so the step reads the same against
         // the public repo and against the fixture that stands in for it offline.
         ui.type(ui.needle().slice(0, 2));
@@ -843,7 +1192,8 @@ def ui_steps() -> list[UiStep]:
         ui.ok('fewer than all', ui.shown().length < ui.rows().length, true);
         ui.ok('count keeps up', /\\d+ of \\d+ match/.test(ui.q('.search-status').textContent), true);
         """, duration=1.1),
-        UiStep("UI-03", "...and the count beside the box says how many matched", "public", """
+        UiStep("UI-03", "...and the count beside the box says how many matched", "public",
+               topics=("search",), body="""
         const needle = ui.needle();
         ui.type(needle);
         const shown = ui.shown().length;
@@ -854,13 +1204,14 @@ def ui_steps() -> list[UiStep]:
               ui.q('.search-status').textContent, shown + ' of ' + ui.rows().length + ' match');
         """),
         UiStep("UI-04", "A query that matches nothing says so, and echoes what was typed",
-               "public", """
+               "public", topics=("search",), body="""
         ui.type('zzz-nothing-here');
         ui.ok('no rows left', ui.shown().length, 0);
         ui.ok('the message is shown', ui.q('.no-matches').hidden, false);
         ui.ok('it quotes the query', ui.q('.no-matches .query').textContent, 'zzz-nothing-here');
         """),
-        UiStep("UI-05", "Escape clears the query and brings every row back", "public", """
+        UiStep("UI-05", "Escape clears the query and brings every row back", "public",
+               topics=("search",), body="""
         ui.type('zzz-nothing-here');
         ui.escape();
         ui.ok('box emptied', ui.q('.search input').value, '');
@@ -869,13 +1220,14 @@ def ui_steps() -> list[UiStep]:
         ui.ok('count cleared', ui.q('.search-status').textContent, '');
         """),
         UiStep("UI-06", "One skill ticked is not a comparison, so the button stays disabled",
-               "public", """
+               "public", topics=("compare",), body="""
         ui.pickAt([0]);
         ui.ok('one ticked', ui.q('.compare-btn').textContent, 'Compare similarity (1)');
         ui.ok('still disabled', ui.q('.compare-btn').disabled, true);
         ui.ok('no grid yet', ui.q('.compare').hidden, true);
         """),
-        UiStep("UI-07", "Tick a second and Compare similarity draws the matrix", "public", """
+        UiStep("UI-07", "Tick a second and Compare similarity draws the matrix", "public",
+               topics=("compare",), body="""
         ui.pickAt([0, 1]);
         ui.ok('button enabled', ui.q('.compare-btn').disabled, false);
         ui.compare();
@@ -886,7 +1238,8 @@ def ui_steps() -> list[UiStep]:
               ui.matrix().filter((td) => /^\\d+%$/.test(td.textContent)).length, 2);
         ui.hoist('.compare');
         """, duration=3.0),
-        UiStep("UI-08", "The matrix follows the selection: six skills, thirty scores", "public", """
+        UiStep("UI-08", "The matrix follows the selection: six skills, thirty scores", "public",
+               topics=("compare",), body="""
         ui.pickAt([0, 1, 2, 3, 4, 5]);
         ui.compare();
         ui.ok('6x6 of cells', ui.matrix().length, 36);
@@ -900,7 +1253,7 @@ def ui_steps() -> list[UiStep]:
         ui.hoist('.compare');
         """, duration=3.4),
         UiStep("UI-09", "Untick to one and the grid waits; tick again and it is back, unasked",
-               "public", """
+               "public", topics=("compare",), body="""
         ui.pickAt([0, 1, 2]);
         ui.compare();
         ui.unpickAt([1, 2]);
@@ -910,7 +1263,8 @@ def ui_steps() -> list[UiStep]:
         ui.ok('2x2 of cells', ui.matrix().length, 4);
         ui.hoist('.compare');
         """),
-        UiStep("UI-10", "The header checkbox ticks what the query left on screen", "public", """
+        UiStep("UI-10", "The header checkbox ticks what the query left on screen", "public",
+               topics=("compare", "search"), body="""
         ui.type(ui.pluralNeedle());
         const visible = ui.shown().map((row) => row.dataset.name);
         ui.ok('the query left something to compare', visible.length > 1, true);
@@ -921,7 +1275,8 @@ def ui_steps() -> list[UiStep]:
         ui.ok('and only the matches', ui.matrix().length, visible.length * visible.length);
         ui.hoist('.compare');
         """),
-        UiStep("UI-11", "A row the next query hides keeps its place in the comparison", "public", """
+        UiStep("UI-11", "A row the next query hides keeps its place in the comparison", "public",
+               topics=("compare", "search"), body="""
         ui.type(ui.pluralNeedle());
         const kept = ui.shown().map((row) => row.dataset.name);
         ui.ok('the query left something to compare', kept.length > 1, true);
@@ -933,7 +1288,8 @@ def ui_steps() -> list[UiStep]:
         ui.ok('all of them still in the grid', ui.matrix().length, kept.length * kept.length);
         ui.hoist('.compare');
         """),
-        UiStep("UI-12", "A name used twice gets its directory printed under it", "atlas", """
+        UiStep("UI-12", "A name used twice gets its directory printed under it", "atlas",
+               topics=("compare",), body="""
         ui.pick(['deploy', 'deploy-staging']);
         ui.compare();
         const labels = ui.all('.compare .matrix th');
@@ -950,7 +1306,8 @@ def ui_steps() -> list[UiStep]:
               ui.matrix().some((td) => td.textContent === '100%'), true);
         ui.hoist('.compare');
         """, duration=3.4),
-        UiStep("UI-13", "Hide closes the matrix and leaves the list as it was", "public", """
+        UiStep("UI-13", "Hide closes the matrix and leaves the list as it was", "public",
+               topics=("compare",), body="""
         ui.pickAt([0, 1, 2]);
         ui.compare();
         ui.close();
@@ -958,7 +1315,8 @@ def ui_steps() -> list[UiStep]:
         ui.ok('ticks kept', ui.q('.compare-btn').textContent, 'Compare similarity (3)');
         ui.ok('rows untouched', ui.shown().length, ui.rows().length);
         """),
-        UiStep("UI-14", "Near-duplicates are grouped below the table, strongest first", "atlas", """
+        UiStep("UI-14", "Near-duplicates are grouped below the table, strongest first", "atlas",
+               topics=("groups", "similarity"), body="""
         const cards = ui.all('.similar .group');
         const scores = cards.map((card) => parseInt(card.querySelector('.score').textContent, 10));
         ui.ok('at least one group', cards.length > 0, true);
@@ -968,7 +1326,8 @@ def ui_steps() -> list[UiStep]:
         ui.ok('every skill is still listed on its own', ui.rows().length, 8);
         ui.hoist('.similar');
         """, duration=3.2),
-        UiStep("UI-15", "--no-similar: no groups, no comparison, the list untouched", "plain", """
+        UiStep("UI-15", "--no-similar: no groups, no comparison, the list untouched", "plain",
+               topics=("template", "search", "compare", "groups"), body="""
         ui.ok('no comparison section', ui.q('.compare'), null);
         ui.ok('no compare button', ui.q('.compare-btn'), null);
         ui.ok('no checkbox column', ui.q('table.skills .pick'), null);
@@ -976,20 +1335,23 @@ def ui_steps() -> list[UiStep]:
         ui.type('deploy');
         ui.ok('and still filters', ui.shown().length, 3);
         """),
-        UiStep("UI-16", "Past 200 skills the comparison is dropped; the list is not", "bulk", """
+        UiStep("UI-16", "Past 200 skills the comparison is dropped; the list is not", "bulk",
+               topics=("template", "search", "compare"), body="""
         ui.ok('201 rows', ui.rows().length, 201);
         ui.ok('no comparison at this size', ui.q('.compare'), null);
         ui.ok('search survives the size', ui.q('.search').hidden, false);
         ui.type('skill-19');
         ui.ok('filtering 201 rows', ui.shown().length, 10);
         """),
-        UiStep("UI-17", "A repo with no skills: a report that says so", "barren", """
+        UiStep("UI-17", "A repo with no skills: a report that says so", "barren",
+               topics=("template",), body="""
         ui.ok('no table', ui.q('table.skills'), null);
         ui.ok('no search box for an empty list', ui.q('.search'), null);
         ui.ok('it says nothing was found',
               document.body.textContent.toLowerCase().includes('no skills'), true);
         """),
-        UiStep("UI-18", "Without JavaScript: the whole table, and no dead controls", "public", """
+        UiStep("UI-18", "Without JavaScript: the whole table, and no dead controls", "public",
+               topics=("template", "search", "compare"), body="""
         // `pickable` is added by the report's own script and is what reveals the checkbox
         // column, so its absence is the proof that none of that script ran.
         ui.ok('the report script did not run',
@@ -1001,7 +1363,7 @@ def ui_steps() -> list[UiStep]:
               getComputedStyle(ui.q('.search')).display, 'none');
         ui.ok('the compare button is hidden too', ui.q('.compare-btn').hidden, true);
         """, strip_script=True),
-        UiStep("UI-19", "The same report in dark mode", "public", """
+        UiStep("UI-19", "The same report in dark mode", "public", topics=("template",), body="""
         ui.ok('dark preferred', matchMedia('(prefers-color-scheme: dark)').matches, true);
         ui.ok('the page follows it',
               getComputedStyle(document.body).backgroundColor !== 'rgb(255, 255, 255)', true);
@@ -1138,16 +1500,62 @@ def clip(text: str, lines: int = 26, width: int = 118) -> str:
     return "\n".join(kept).rstrip()
 
 
-def title_frame(repo: str | None, project: Path) -> Frame:
+def title_frame(repo: str | None, project: Path, scope: Scope) -> Frame:
+    if scope.scoped:
+        heading = f"skill&#8209;atlas, {escape(scope.label)}"
+        lead = ("Every user scenario in <code>spec/cli.md</code> that this change can reach, "
+                "run for real against real repositories, with the assertion that decides each "
+                "one beside it. What it cannot reach was not filmed, and the next frame says "
+                "which and why.")
+        where = (f"change &nbsp;{escape(scope.detail or scope.rev_range)}<br>"
+                 f"diff &nbsp;{escape(scope.rev_range)}<br>")
+    else:
+        heading = "skill&#8209;atlas, end to end"
+        lead = ("Every user scenario in <code>spec/cli.md</code>, run for real against real "
+                "repositories, with the assertion that decides each one shown beside it.")
+        where = ""
     body = f"""<div class="title">
-      <h1>skill&#8209;atlas, end to end</h1>
-      <p>Every user scenario in <code>spec/cli.md</code>, run for real against real
-      repositories, with the assertion that decides each one shown beside it.</p>
-      <div class="meta">checkout &nbsp;{escape(str(project))}<br>
+      <h1>{heading}</h1>
+      <p>{lead}</p>
+      <div class="meta">{where}checkout &nbsp;{escape(str(project))}<br>
       network repo &nbsp;{escape(repo or "(skipped: --offline)")}<br>
       local fixtures &nbsp;atlas &middot; barren &middot; bulk (201 skills)</div>
     </div>"""
     return Frame("TITLE", page("skill-atlas demo", body), 4.2)
+
+
+def scope_frame(scope: Scope, filmed: int) -> Frame:
+    """How the diff was read. Only in a scoped run, and load-bearing there.
+
+    A subset of a suite that does not say what it left out is indistinguishable from the whole
+    suite passing, and this frame is the run showing its working: the range, every change in
+    it, the topics each one mapped to, and the scenarios that mapping left on the floor.
+    """
+    mapped = "".join(
+        f'<tr><td class="what">{escape(what)}</td>'
+        f'<td class="id">{escape(", ".join(topics))}</td></tr>'
+        for what, topics in scope.mapped[:22]
+    ) or '<tr><td class="what">(the diff is empty)</td><td class="id">&mdash;</td></tr>'
+    if len(scope.mapped) > 22:
+        mapped += f'<tr><td class="id">&hellip; and {len(scope.mapped) - 22} more</td><td></td></tr>'
+    left = "".join(
+        f'<tr><td class="id">{escape(sid)}</td><td class="what">{escape(caption)}</td></tr>'
+        for sid, caption in scope.declined[:22]
+    )
+    if len(scope.declined) > 22:
+        left += f'<tr><td class="id">&hellip;</td><td class="what">and {len(scope.declined) - 22} more</td></tr>'
+    warn = "".join(
+        f'<div class="bad">widened to everything: {escape(why)}</div>' for why in scope.widened
+    )
+    counts = (f"{filmed} filmed &middot; {len(scope.declined)} outside the diff &middot; "
+              f"topics: {escape(', '.join(sorted(scope.topics)) or '(none)')}")
+    body = (
+        band("SCOPE", f"What {scope.label} changes, and what that reaches")
+        + f'<main class="wide"><div class="took" style="font-size:17px;color:#cfe0ff">{counts}</div>'
+          f'{warn}<div class="split"><table class="tally">{mapped}</table>'
+          f'<table class="tally">{left}</table></div></main>'
+    )
+    return Frame("SCOPE", page("scope", body), 6.0)
 
 
 def terminal_frames(step: Scenario) -> list[Frame]:
@@ -1189,7 +1597,7 @@ def terminal_frames(step: Scenario) -> list[Frame]:
     return frames
 
 
-def summary_frame(steps: list[Scenario]) -> Frame:
+def summary_frame(steps: list[Scenario], scope: Scope) -> Frame:
     passed = sum(1 for s in steps if s.ok)
     total_checks = sum(len(s.checks) for s in steps)
 
@@ -1205,8 +1613,14 @@ def summary_frame(steps: list[Scenario]) -> Frame:
     # Two columns: a single list of every scenario is taller than the frame.
     half = (len(steps) + 1) // 2
     heading = f"{passed} of {len(steps)} scenarios green &middot; {total_checks} assertions"
+    caption = "Every scenario, and how it went"
+    if scope.scoped:
+        # Never "every scenario" on a scoped run: that is the false claim this flag could
+        # otherwise make, and the summary frame is the one most likely to be read alone.
+        heading += f" &middot; {len(scope.declined)} left unfilmed, outside {scope.label}"
+        caption = f"Every scenario {scope.label} reaches, and how it went"
     body = (
-        band("SUMMARY", "Every scenario, and how it went",
+        band("SUMMARY", caption,
              "OK" if passed == len(steps) else f"FAIL  {len(steps) - passed} red")
         + f'<main class="wide"><div class="took" style="font-size:17px;color:#cfe0ff">{heading}</div>'
           f'<div class="split">{table(steps[:half])}{table(steps[half:])}</div></main>'
@@ -1281,6 +1695,18 @@ def capture(
 # --------------------------------------------------------------------------- video
 
 
+def frame_listing(shots: list[Frame], work: Path) -> Path:
+    """The concat script both encoders read. Scratch, so it goes with the rest of the scratch."""
+    listing = work / "frames.txt"
+    lines: list[str] = []
+    for frame in shots:
+        lines.append(f"file '{frame.png.as_posix()}'")  # type: ignore[union-attr]
+        lines.append(f"duration {frame.duration:.2f}")
+    lines.append(f"file '{shots[-1].png.as_posix()}'")  # concat needs the last one twice
+    listing.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return listing
+
+
 def assemble(
     frames: list[Frame], out: Path, work: Path, ffmpeg: str | None, fps: int
 ) -> tuple[Path | None, str]:
@@ -1288,16 +1714,9 @@ def assemble(
     if not shots:
         return None, "no frames were captured"
     if ffmpeg:
-        listing = work / "frames.txt"  # scratch, so it goes with the rest of the scratch
-        lines: list[str] = []
-        for frame in shots:
-            lines.append(f"file '{frame.png.as_posix()}'")
-            lines.append(f"duration {frame.duration:.2f}")
-        lines.append(f"file '{shots[-1].png.as_posix()}'")  # concat needs the last one twice
-        listing.write_text("\n".join(lines) + "\n", encoding="utf-8")
         argv = [
             ffmpeg, "-y", "-loglevel", "error",
-            "-f", "concat", "-safe", "0", "-i", str(listing),
+            "-f", "concat", "-safe", "0", "-i", str(frame_listing(shots, work)),
             "-vf", f"fps={fps},format=yuv420p",
             "-c:v", "libx264", "-preset", "medium", "-crf", "20",
             "-movflags", "+faststart",
@@ -1308,33 +1727,154 @@ def assemble(
             return out, f"{len(shots)} frames, {sum(f.duration for f in shots):.0f}s"
         print(f"record_demo: ffmpeg failed ({done.returncode}): {done.stderr.strip()[:400]}",
               file=sys.stderr)
+    gif, note = assemble_gif(frames, out.with_suffix(".gif"), work, ffmpeg, 0)
+    return gif, note if gif is None else f"{note}; GIF fallback, no mp4 (no working ffmpeg)"
+
+
+def assemble_gif(
+    frames: list[Frame], out: Path, work: Path, ffmpeg: str | None, width: int
+) -> tuple[Path | None, str]:
+    """The same storyboard as an animated GIF, which is what a pull request can show inline.
+
+    A GIF and not the mp4 because of where it ends up: GitHub renders an attached GIF in the
+    body itself, playing, while an mp4 becomes a player somebody has to press. It is the same
+    frames at the same durations, so nothing about the film is different -- only the container.
+
+    `dither=none` is deliberate. The frames are flat UI colour and small monospace text, which
+    a dither turns into noise around every glyph and inflates besides; without it a 128-colour
+    palette is exact for pages like these. Frames are held for seconds each, so the animation
+    is a slideshow rather than video: one GIF frame per still, each with its own delay, which
+    is why this stays a few MB where a fixed frame rate would not.
+    """
+    shots = [f for f in frames if f.png]
+    if not shots:
+        return None, "no frames were captured"
+    scale = f"scale={width}:-2:flags=lanczos," if width else ""
+    if ffmpeg:
+        argv = [
+            ffmpeg, "-y", "-loglevel", "error",
+            "-f", "concat", "-safe", "0", "-i", str(frame_listing(shots, work)),
+            "-vf", f"{scale}split[a][b];[a]palettegen=max_colors=128[p];"
+                   f"[b][p]paletteuse=dither=none",
+            "-loop", "0",
+            str(out),
+        ]
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=1800)
+        if done.returncode == 0 and out.exists():
+            return out, f"{len(shots)} frames, {out.stat().st_size / 1e6:.1f} MB"
+        print(f"record_demo: ffmpeg could not write the GIF ({done.returncode}): "
+              f"{done.stderr.strip()[:400]}", file=sys.stderr)
     try:
         from PIL import Image  # type: ignore[import-not-found]
     except ImportError:
         return None, ("no ffmpeg and no Pillow: the frames are on disk, assemble them with "
-                      "`ffmpeg -f concat -safe 0 -i frames.txt -vf fps=30,format=yuv420p out.mp4`")
-    gif = out.with_suffix(".gif")
+                      "`ffmpeg -f concat -safe 0 -i frames.txt -loop 0 out.gif`")
     pictures = [Image.open(f.png).convert("P", palette=Image.ADAPTIVE, colors=128) for f in shots]
     pictures[0].save(
-        gif, save_all=True, append_images=pictures[1:], loop=0, optimize=True,
+        out, save_all=True, append_images=pictures[1:], loop=0, optimize=True,
         duration=[int(f.duration * 1000) for f in shots],
     )
-    return gif, f"{len(shots)} frames, GIF fallback (no ffmpeg)"
+    return out, f"{len(shots)} frames, {out.stat().st_size / 1e6:.1f} MB, through Pillow"
 
 
 # --------------------------------------------------------------------------- transcript
 
 
-def write_transcript(path: Path, steps: list[Scenario], video: Path | None, note: str) -> None:
+def scope_lines(scope: Scope) -> list[str]:
+    """The scope, as prose, for the transcript and for the pull request section.
+
+    Both readers need the same three things and for the same reason: what the diff was, what
+    it was read as, and what that left unfilmed. A tally with no such list is a claim about
+    the whole suite dressed up as a claim about a subset.
+    """
+    if not scope.scoped:
+        return []
+    lines = [
+        f"Scoped to **{scope.label}**"
+        + (f" — {scope.detail}" if scope.detail else "")
+        + f", diffed as `{scope.rev_range}`.",
+        "",
+        f"Topics reached: {', '.join(sorted(scope.topics)) or '(none)'}.",
+        "",
+    ]
+    for why in scope.widened:
+        lines += [f"Widened to every topic: {why}.", ""]
+    lines += ["| Change | Reaches |", "|---|---|"]
+    lines += [f"| `{what}` | {', '.join(topics)} |" for what, topics in scope.mapped]
+    if not scope.mapped:
+        lines.append("| (the diff is empty) | — |")
+    lines.append("")
+    if scope.declined:
+        lines += [
+            f"{len(scope.declined)} scenarios were **not filmed**; nothing in this change "
+            "reaches them:",
+            "",
+        ]
+        lines += [f"- {sid} — {caption}" for sid, caption in scope.declined]
+        lines.append("")
+    return lines
+
+
+def tally(steps: list[Scenario], scope: Scope) -> str:
     passed = sum(1 for s in steps if s.ok)
+    what = f"every scenario {scope.label} reaches" if scope.scoped else "every scenario"
+    return (f"{passed} of {len(steps)} scenarios green, "
+            f"{sum(len(s.checks) for s in steps)} assertions — {what} in `spec/cli.md`, "
+            f"run for real.")
+
+
+def write_pr_section(
+    path: Path, steps: list[Scenario], scope: Scope, gif: Path | None, note: str
+) -> None:
+    """A block to paste into the pull request body, with a home for the GIF.
+
+    The attachment is the one part that cannot be automated: GitHub has no API for uploading
+    one, so the URL only exists once a file has been dropped into the editor in a browser. So
+    this writes everything around it and says exactly where the drop goes, rather than
+    pretending the whole thing is mechanical.
+
+    The evidence here is the tally and the table, not the picture. A reader who never plays
+    the GIF should still be able to see which scenarios ran and which did not.
+    """
+    drop = [
+        "<!-- Drag demo-run/demo.gif into the GitHub editor on the line below. GitHub has no",
+        "     API for attachments, so this is the one step that has to happen in the browser;",
+        "     a dropped GIF plays in the body, where an mp4 becomes a player to press. -->",
+        "",
+        "",
+    ] if gif is not None else [f"<!-- No GIF was produced: {note} -->", ""]
+    lines = [
+        "## Demo",
+        "",
+        *drop,
+        tally(steps, scope),
+        "",
+        f"Filmed by `.claude/skills/demo-video` ({note}).",
+        "",
+        "<details><summary>Every scenario, and its verdict</summary>",
+        "",
+        "| Scenario | What it proves | Checks | Verdict |",
+        "|---|---|---|---|",
+    ]
+    lines += [
+        f"| {s.id} | {s.caption} | {len(s.checks)} | {'PASS' if s.ok else '**FAIL**'} |"
+        for s in steps
+    ]
+    lines += ["", *scope_lines(scope), "</details>", ""]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_transcript(
+    path: Path, steps: list[Scenario], scope: Scope, video: Path | None, note: str
+) -> None:
     lines = [
         "# skill-atlas demo run",
         "",
-        f"{passed} of {len(steps)} scenarios green, "
-        f"{sum(len(s.checks) for s in steps)} assertions.",
+        tally(steps, scope),
         "",
         f"Video: `{video}`  ({note})" if video else f"No video: {note}",
         "",
+        *scope_lines(scope),
         "| Scenario | What it proves | Checks | Verdict |",
         "|---|---|---|---|",
     ]
@@ -1376,6 +1916,17 @@ def main(argv: list[str] | None = None) -> int:
                         help="public repository for the over-the-network scenario")
     parser.add_argument("--offline", action="store_true",
                         help="skip the network scenario and use the local fixtures only")
+    picked = parser.add_mutually_exclusive_group()
+    picked.add_argument("--diff", nargs="?", const="auto", default=None, metavar="<range>",
+                        help="film only the scenarios a diff can reach, e.g. "
+                             "--diff origin/main...HEAD; bare --diff works the base out")
+    picked.add_argument("--pr", "--mr", type=int, default=None, metavar="<number>",
+                        help="film only the scenarios one merge request can reach, by number")
+    parser.add_argument("--gif", action=argparse.BooleanOptionalAction, default=None,
+                        help="also write demo.gif, which is what a pull request can show "
+                             "inline (default: on for --diff and --pr, off otherwise)")
+    parser.add_argument("--gif-width", type=int, default=0, metavar="<px>",
+                        help="scale the GIF to this width; 0 keeps the full 1280")
     parser.add_argument("--edge", default=None, help="path to msedge.exe")
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--workers", type=int, default=4, help="concurrent Edge launches")
@@ -1394,6 +1945,21 @@ def main(argv: list[str] | None = None) -> int:
     if not shutil.which("git"):
         die("git is not on PATH")
     edge = find_edge(args.edge)
+
+    # Settled before the fixtures are built and before last run's output is deleted: a bad
+    # range or an unreachable merge request should cost a message, not an hour of filming or
+    # the previous video.
+    if args.pr is not None and args.offline:
+        die("--pr reads the merge request from GitHub and fetches its head, so it cannot run "
+            "--offline; use --diff <base>...<head> against refs you already have")
+    if args.pr is not None:
+        scope = merge_request_scope(project, args.pr)
+    elif args.diff is not None:
+        rev_range = default_range(project) if args.diff == "auto" else args.diff
+        scope = resolve_scope(project, rev_range, rev_range)
+    else:
+        scope = Scope()
+    want_gif = scope.scoped if args.gif is None else args.gif
 
     # Everything intermediate -- the fixture repositories (each with its own .git), the
     # reports, the frames, the browser profiles -- lives outside the checkout in a temp
@@ -1421,9 +1987,9 @@ def main(argv: list[str] | None = None) -> int:
     # The scratch names are here too, so an output directory left over from an older version of
     # this script -- when the frames and fixtures were written next to the video -- gets tidied
     # up rather than lingering.
-    for stale in ("demo.mp4", "demo.gif", "transcript.md", "frames.txt", "record_open.py",
-                  "browser-opened.txt", "frames", "fixtures", "reports", "profiles",
-                  ".edge-profiles"):
+    for stale in ("demo.mp4", "demo.gif", "transcript.md", "pr-section.md", "frames.txt",
+                  "record_open.py", "browser-opened.txt", "frames", "fixtures", "reports",
+                  "profiles", ".edge-profiles"):
         wipe(out / stale)
     out.mkdir(parents=True, exist_ok=True)
     check_ignored(out, project)
@@ -1438,11 +2004,45 @@ def main(argv: list[str] | None = None) -> int:
     say(f"  video     {out}")
     say(f"  scratch   {work}{'' if args.keep else '  (deleted after the video)'}")
     say(f"  edge      {edge}")
+    if scope.scoped:
+        say(f"  scope     {scope.label}  ({scope.rev_range})")
+        for what, topics in scope.mapped:
+            say(f"            {what}  ->  {', '.join(topics)}")
+        for why in scope.widened:
+            say(f"            widened to every topic: {why}")
+
+    # Nothing to film is a real answer, not a failure: a branch that only moves tests, CI or
+    # prose changes no scenario. Said plainly and written down, because the caller's next move
+    # is to put this in a pull request, and "no video" needs a reason attached to it.
+    if scope.empty:
+        transcript = out / "transcript.md"
+        write_transcript(transcript, [], scope, None, "nothing in this change reaches a scenario")
+        write_pr_section(out / "pr-section.md", [], scope, None,
+                         "nothing in this change reaches a scenario")
+        wipe(work, strict=False)
+        say("")
+        say(f"Nothing filmed: no scenario in spec/cli.md is reachable from {scope.label}.")
+        say(f"transcript {transcript}")
+        return 0
 
     say("Building local fixture repositories...")
     fixtures = build_fixtures(work / "fixtures")
 
-    driver = Driver(project, work, args.timeout)
+    # The UI steps are picked before anything runs, because each one is driven against a
+    # report some CLI scenario has to have written -- so choosing them decides which scans
+    # are compulsory whatever the diff touched.
+    all_ui = ui_steps()
+    wanted_ui = [s for s in all_ui if scope.wants(s.id, s.caption, s.topics)]
+    required = {REPORT_PRODUCER[key]
+                for step in wanted_ui
+                for key in (step.report, UI_FALLBACK.get(step.report, step.report))
+                if key in REPORT_PRODUCER}
+    for topics, needs in SCENARIO_NEEDS.values():
+        if scope.reaches(topics):
+            required |= set(needs)
+    scope.pin(required)
+
+    driver = Driver(project, work, args.timeout, scope)
     repo_url = None if args.offline else args.repo
     say("Running the CLI scenarios...")
     steps = cli_scenarios(driver, fixtures, repo_url)
@@ -1453,9 +2053,13 @@ def main(argv: list[str] | None = None) -> int:
                 say(f"        {bad.label}: {bad.actual}  (expected {bad.expected})")
 
     say("Driving the report in Edge...")
-    pairs = build_ui_frames(ui_steps(), driver.reports)
-    missing = {s.id for s in ui_steps()} - {step.id for step, _ in pairs}
-    frames: list[Frame] = [title_frame(repo_url, project)]
+    pairs = build_ui_frames(wanted_ui, driver.reports)
+    missing = {s.id for s in wanted_ui} - {step.id for step, _ in pairs}
+    frames: list[Frame] = [title_frame(repo_url, project, scope)]
+    if scope.scoped:
+        # After the CLI run, so the frame can list what the run actually declined rather than
+        # what it expected to.
+        frames.append(scope_frame(scope, len(steps) + len(pairs)))
     for step in steps:
         frames.extend(terminal_frames(step))
     frames.extend(frame for _, frame in pairs)
@@ -1479,15 +2083,21 @@ def main(argv: list[str] | None = None) -> int:
         ghost.checks = [Check("report available", "missing", "written", False)]
         steps.append(ghost)
 
-    tail = summary_frame(steps)  # last, because it tallies up everything above
+    tail = summary_frame(steps, scope)  # last, because it tallies up everything above
     capture([tail], edge, work / "frames", work / "profiles", 1, args.quiet, offset=len(frames))
     frames.append(tail)
 
     say("Assembling the video...")
     ffmpeg = find_ffmpeg()
     video, note = assemble(frames, out / "demo.mp4", work, ffmpeg, args.fps)
+    gif, gif_note = (None, "not asked for")
+    if want_gif:
+        say("Assembling the GIF...")
+        gif, gif_note = assemble_gif(frames, out / "demo.gif", work, ffmpeg, args.gif_width)
     transcript = out / "transcript.md"
-    write_transcript(transcript, steps, video, note)
+    write_transcript(transcript, steps, scope, video, note)
+    section = out / "pr-section.md"
+    write_pr_section(section, steps, scope, gif, gif_note if want_gif else note)
 
     if args.keep:
         say(f"Scratch kept at {work}")
@@ -1503,8 +2113,13 @@ def main(argv: list[str] | None = None) -> int:
     passed = sum(1 for s in steps if s.ok)
     say("")
     say(f"{passed}/{len(steps)} scenarios green, {sum(len(s.checks) for s in steps)} assertions")
+    if scope.scoped:
+        say(f"{len(scope.declined)} scenarios not filmed: nothing in {scope.label} reaches them")
     say(f"video      {video or '(none: ' + note + ')'}")
+    if want_gif:
+        say(f"gif        {gif}  ({gif_note})" if gif else f"gif        (none: {gif_note})")
     say(f"transcript {transcript}")
+    say(f"pr section {section}")
     if passed != len(steps):
         say("")
         say("Red scenarios:")
@@ -1513,7 +2128,9 @@ def main(argv: list[str] | None = None) -> int:
                 say(f"  {step.id}  {step.caption}")
                 for bad in (c for c in step.checks if not c.pass_):
                     say(f"      {bad.label}: {bad.actual}  (expected {bad.expected})")
-    return 0 if passed == len(steps) and video else 1
+    # A GIF that was asked for and did not appear counts: it is what the pull request was
+    # going to show, so a silent 0 here would send somebody to paste a file that is not there.
+    return 0 if passed == len(steps) and video and (gif or not want_gif) else 1
 
 
 if __name__ == "__main__":

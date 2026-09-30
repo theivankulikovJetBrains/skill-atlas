@@ -1,6 +1,6 @@
 ---
 name: demo-video
-description: Run skill-atlas locally through every user scenario in spec/cli.md and film the run as demo.mp4. Use when asked to run or demo the app end to end, to exercise all scenarios or all the flags, to record a video/screencast/demo/GIF of it working, or to show a change working in the real app rather than in tests.
+description: Run skill-atlas locally through every user scenario in spec/cli.md and film the run as demo.mp4, or only the scenarios one branch or merge request can reach as demo.gif for a pull request body. Use when asked to run or demo the app end to end, to exercise all scenarios or all the flags, to record a video/screencast/demo/GIF of it working, to film just the changes in a branch/PR/merge request, or to show a change working in the real app rather than in tests.
 ---
 
 # Run every scenario and film it
@@ -28,6 +28,9 @@ About **70 seconds** warm. A first run adds a clone of the public repo and, if t
 
 | Flag | Why |
 |---|---|
+| `--diff [<range>]` | film only what this change can reach; bare `--diff` works the base out |
+| `--pr <number>` | the same, for one merge request by number (`--mr` is the same flag) |
+| `--gif` / `--no-gif` | also write `demo.gif`; on by default for `--diff` and `--pr` |
 | `--offline` | skip the one over-the-network scenario; everything else uses local fixtures |
 | `--repo <url>` | a different public repo for that scenario (default `anthropics/skills`) |
 | `--project <path>` | film a different checkout, e.g. a feature worktree |
@@ -36,7 +39,8 @@ About **70 seconds** warm. A first run adds a clone of the public repo and, if t
 | `--keep` | leave the scratch directory behind, which is how you debug a bad frame |
 | `--edge <path>` | if `msedge.exe` is somewhere unusual |
 
-`--fps`, `--timeout`, `--work-dir` and `--quiet` are there too; `--help` lists everything.
+`--gif-width`, `--fps`, `--timeout`, `--work-dir` and `--quiet` are there too; `--help` lists
+everything.
 
 `--offline` is green, not degraded: the report steps fall back to the `atlas` fixture, and they
 take their search query from the first row of whatever report they are filming rather than
@@ -44,23 +48,72 @@ naming a skill, so the same step reads against either one. Keep new steps that w
 only the public repo has is a step that breaks the moment the network is gone or that repo
 gains a skill.
 
+## Just this change, for a pull request
+
+```bash
+python .claude/skills/demo-video/scripts/record_demo.py --diff          # this branch
+python .claude/skills/demo-video/scripts/record_demo.py --pr 7          # one merge request
+```
+
+Films **only the scenarios the change can reach** and writes `demo-run/pr-section.md`, a
+`## Demo` block ready to paste into the pull request body — which is what
+`.github/pull_request_template.md` asks for. Minutes become seconds on a narrow change, and
+the film opens with a frame showing how the diff was read.
+
+Bare `--diff` works the base out (`origin/HEAD`, else `origin/main`, else `main`) and diffs
+`<base>...HEAD`; give it a range to be explicit. It reads **committed** work, so commit before
+filming — or pass a range like `--diff main` that includes the working tree. `--pr <number>`
+fetches `refs/pull/<n>/head` and asks the GitHub API for the base branch and title, through the
+token Git Credential Manager already holds; it needs the network, so it cannot be `--offline`.
+
+How a file becomes a set of scenarios is three tables in `record_demo.py`:
+
+- `PATH_TOPICS` — what a changed file can move. A path matching nothing widens the run to
+  everything and says so, because "unmapped" must never read as "affects nothing".
+- `SPEC_TOPICS` — `spec/cli.md` **section by section**. Definition of Done step 4 puts a spec
+  change in almost every branch, so treating the contract as one unit would select everything
+  every time. A heading that is not in the table widens the run and names itself.
+- Each scenario's own `topics=`, beside the scenario. A UI scenario also pulls in the scan
+  that writes the report it is driven against (`REPORT_PRODUCER`), and CLI-16 pulls in a scan
+  to have something to assert about (`SCENARIO_NEEDS`) — "no browser opened" is true for free
+  when nothing ran.
+
+**Keep those tables moving with the code.** A new module, a renamed spec section or a new
+scenario that nobody mapped is the one failure this feature can have: a scenario that was
+never filmed reads exactly like a scenario that passed. `models.py` and `uv.lock` map to every
+topic on purpose — the shared data model and the two runtime dependencies can move anything —
+so a branch touching either is a full run by design, not a mapping to tighten.
+
+A change that reaches nothing — tests, CI, prose — films nothing, says so, writes the reason
+into both files and exits `0`. Report that; it is a better answer than a film of something
+unrelated.
+
 ## What you get
 
-Two files, about 3 MB:
+Three files, about 3 MB, or four with a GIF:
 
 ```
 demo-run/
   demo.mp4          the film: title card, every scenario, a summary of all of them
+  demo.gif          the same frames, for a pull request body (--diff and --pr, or --gif)
   transcript.md     every command, its output, and every assertion with its verdict
+  pr-section.md     the `## Demo` block to paste into the pull request
 ```
 
-The last run: **37 scenarios, 145 assertions, 2m17s of film** at 1280×900 — and 36 of 36 under
-`--offline`, which drops only the over-the-network scan.
+The last full run: **37 scenarios, 145 assertions, 2m17s of film** at 1280×900 — and 36 of 36
+under `--offline`, which drops only the over-the-network scan.
 
 **Read `transcript.md` and report from it.** Say how many scenarios were green, name any that
-were not, and quote the assertion that failed. Do not describe the video as proof that the app
-works — the assertions are the proof, and the transcript is where they are written down. Point
-the user at `demo-run/demo.mp4`; offer to open it rather than opening it unasked.
+were not, and quote the assertion that failed. On a scoped run say what was *not* filmed too —
+the transcript lists it. Do not describe the video as proof that the app works: the assertions
+are the proof, and the transcript is where they are written down. Point the user at
+`demo-run/demo.mp4`; offer to open it rather than opening it unasked.
+
+The GIF is a GIF because of where it goes: GitHub plays an attached GIF in the body, while an
+mp4 becomes a player somebody has to press. Attaching it is the one step that cannot be
+scripted — there is no API for attachments, so the URL only exists once the file has been
+dropped into the PR editor in a browser. Ask for that, or say in the body that the GIF is on
+disk and unattached. Never write the body as though a video is there when it is not.
 
 ## Nothing is left behind, and nothing is visible to git
 
@@ -70,7 +123,7 @@ generated reports, 57 frame PNGs, the Edge profiles — is built in a fresh temp
 is deleted as soon as the video exists. The run prints where the scratch was and confirms it
 went. `--keep` suspends that for debugging and says where to look.
 
-What lands in the checkout is the video and the transcript, under a `demo-run/` that
+What lands in the checkout is the film and the two markdown files, under a `demo-run/` that
 `.gitignore` covers, and last run's copies are deleted by name before this one starts. If
 `--out-dir` puts them somewhere git *can* see, the run says so on stderr rather than letting a
 3 MB video turn up in `git status`.
@@ -89,9 +142,9 @@ mention afterwards:
   tag, a duplicated skill name or an exact skill count belongs there, not in a public repo
   whose contents can change under the run.
 
-Adding a scenario is a few lines: a `Check`-bearing entry in the list, and the numbers it
-asserts. Keep the captions in the same voice as the commit subjects — what the scenario
-proves, in the imperative.
+Adding a scenario is a few lines: a `Check`-bearing entry in the list, the numbers it asserts,
+and the `topics=` that decide which changes film it. Keep the captions in the same voice as
+the commit subjects — what the scenario proves, in the imperative.
 
 ## How it works, and why each part is like that
 
@@ -130,7 +183,14 @@ animated GIF through Pillow, and says so.
 - **`driver error` in the checks.** The injected step JavaScript threw — usually a selector
   the template renamed. The report's own script is the reference for what exists.
 - **A UI scenario reported as "skipped: its report was never written".** Its CLI scenario
-  failed first; fix that one and the frame comes back.
+  failed first; fix that one and the frame comes back. Under `--diff` this should be
+  impossible — a selected UI step pins its scan in — so it means `REPORT_PRODUCER` has
+  drifted from the `remember=` keys.
+- **A scoped run that films less than it should.** Check the SCOPE frame or the transcript's
+  scope table: it names every change and what each one mapped to. A row reaching fewer topics
+  than the change really moves is a `PATH_TOPICS`/`SPEC_TOPICS` entry to widen — fix the
+  table, not the scenario. Run it again without `--diff` to see the whole list while you are
+  deciding.
 - **A count assertion off by a few** after the fixtures change. The fixture is the source of
   truth for those numbers, so update the expectation rather than the repository — unless the
   repository is what you meant to change.

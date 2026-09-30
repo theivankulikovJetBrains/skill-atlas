@@ -18,6 +18,7 @@ Nothing is installed globally; everything runs through `uv` (Python ≥3.14, `gi
 | One test file or case | `uv run pytest tests/test_scanner.py -k frontmatter` |
 | Run the CLI | `uv run skill-atlas scan <git repo url>` |
 | Run every scenario and film it | `python .claude/skills/demo-video/scripts/record_demo.py` |
+| Film only what this branch changes | `python .claude/skills/demo-video/scripts/record_demo.py --diff` |
 | Build sdist + wheel | `uv build` |
 
 The suite finishes in seconds — there is no reason to skip it or to run a subset as a final
@@ -117,6 +118,12 @@ happens when stdout is a terminal. It asserts as it goes and exits non-zero on a
 so it is a check that happens to produce a video, not a screencast that happens to run the app.
 Its scenario list is a reading of `spec/cli.md`: when behaviour moves, move that too.
 
+`--diff` and `--pr` narrow a run to the scenarios one branch or one merge request can reach,
+and write `demo-run/pr-section.md` for the pull request body — which is what step 6 below and
+`.github/pull_request_template.md` ask for. What decides "can reach" is a map from changed
+paths and spec sections to scenarios, held in `record_demo.py` and documented in the skill;
+a new module or a renamed spec section has to move that map too, or it films too little.
+
 Data flows one way: `repo` → `scanner` → `similarity` → `models` → `report` → `cli`. Keep it that way;
 nothing below `cli.py` should print, and nothing should reach the network outside `repo.py` —
 the report server in `cli.py` binds `127.0.0.1` and serves one in-memory document.
@@ -209,7 +216,18 @@ Follow what the existing modules already do rather than importing a new style:
    then what moved, then what you verified — match PRs #1 and #2.
    `.github/pull_request_template.md` spells that shape out, but GitHub only pre-fills it in
    the web UI; a PR created through the API gets exactly the body you send, so follow the
-   template by hand rather than assuming it applied. A second POST for a branch
+   template by hand rather than assuming it applied. Its `## Demo` section comes from the
+   demo-video skill:
+   ```bash
+   python .claude/skills/demo-video/scripts/record_demo.py --diff
+   ```
+   which films the scenarios this branch can reach and leaves `demo-run/pr-section.md` ready
+   to paste in, with `demo-run/demo.gif` beside it. **Attaching the GIF is not scriptable** —
+   GitHub has no attachment API, so the URL only exists after the file is dropped into the PR
+   editor in a browser. Ask the user to drop it in, or say in the body that the GIF is on disk
+   and unattached; a body that reads as though a video is there when it is not is worse than
+   no demo. A branch the run finds no scenario for says so, and saying that is a fine answer.
+   A second POST for a branch
    that already has an open PR returns 422 `A pull request already exists`; that is the
    correct outcome of a retry, so read the existing one from
    `?head=theivankulikovJetBrains:<branch>` rather than opening another. Merging the PR is the

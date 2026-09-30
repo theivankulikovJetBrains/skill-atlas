@@ -33,11 +33,30 @@ What you actually ran, not what ought to pass:
   the wheel.
 - The run on this branch, linked. CI triggers on `pull_request`, so it starts when this
   opens. A local suite is not a green CI run -- say which one you are reporting.
-- For report or UI changes, what you drove in a browser, and screenshots. The suite can
-  only pin markup.
+- Anything you drove by hand that the suite cannot reach. The demo below covers the report
+  in a real browser; say what else you tried.
 
 Then whether `spec/cli.md` matches the behaviour that now exists. It is the contract; if
 behaviour moved and the spec did not, one of them is wrong.
+-->
+
+
+## Demo
+
+<!--
+The scenarios this branch can reach, run for real against real repositories and filmed:
+
+    python .claude/skills/demo-video/scripts/record_demo.py --diff
+
+Replace this whole section with `demo-run/pr-section.md`, which the run writes ready to
+paste: it already carries the tally, every scenario's verdict, and the list of scenarios the
+diff does not reach and which therefore were not filmed. Then drag `demo-run/demo.gif` onto
+the blank line it leaves for it. That upload is the one step that only works in this editor
+-- GitHub has no API for attachments -- and a dropped GIF plays here in the body, where an
+mp4 turns into a player somebody has to press.
+
+A change that reaches no scenario at all -- tests, CI, prose -- gets told so by the run, and
+saying that here is a better answer than a film of something unrelated.
 -->
 
 
