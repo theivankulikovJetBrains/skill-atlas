@@ -14,8 +14,13 @@ main checkout, so ignoring it produces a blocked tool call rather than a mess.
    launcher needs the JetBrains Central proxy:
 
    ```
-   ! scripts/sbx-feature.sh start -d <feature>
+   ! & 'C:\Program Files\Git\bin\bash.exe' scripts/sbx-feature.sh start -d <feature>
    ```
+
+   Spell out the Git Bash binary. The session shell is PowerShell, which has no handler for
+   `.sh`, and a bare `bash` resolves to the WSL shim in `WindowsApps` — there `cygpath` and
+   `%LOCALAPPDATA%` are missing, so the launcher cannot find `sbx.exe` and dies. From a Git
+   Bash terminal, `scripts/sbx-feature.sh start -d <feature>` is enough.
 
    The feature name becomes the branch, the sibling directory `../<feature>` and the sandbox
    name at once, so it is limited to 2+ characters of letters, digits, `.` or `-`, starting
