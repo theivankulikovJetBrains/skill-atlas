@@ -16,6 +16,7 @@ from .models import ScanResult
 from .report import format_console, write_html
 from .repo import RepoError, clone, web_base_url
 from .scanner import find_skills
+from .similarity import DEFAULT_THRESHOLD, find_similar
 
 DEFAULT_REPORT = "report.html"
 DEFAULT_PORT = 8888
@@ -170,6 +171,23 @@ def _port(value: str) -> int:
     return port
 
 
+def _ratio(value: str) -> float:
+    """Parse ``--similarity``, which is a fraction of 1 and not a percentage.
+
+    Same reasoning as :func:`_port`: a value no score could ever equal is a typo, and
+    saying so costs exit code 2 up front rather than an empty "Similar skills" section
+    after the clone and the scan have already run. ``nan`` and ``inf`` parse as floats
+    and fail the range test, which is where they belong.
+    """
+    try:
+        ratio = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number") from None
+    if not 0.0 <= ratio <= 1.0:
+        raise argparse.ArgumentTypeError(f"{value} is outside the range 0-1")
+    return ratio
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="skill-atlas",
@@ -202,6 +220,18 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"port for the report server (default: {DEFAULT_PORT}; 0 picks any free port)",
     )
     scan.add_argument(
+        "--similarity",
+        type=_ratio,
+        metavar="<0-1>",
+        default=DEFAULT_THRESHOLD,
+        help=f"how alike two skills must read to be grouped (default: {DEFAULT_THRESHOLD}; 1 is identical)",
+    )
+    scan.add_argument(
+        "--no-similar",
+        action="store_true",
+        help="do not group skills that look like near-duplicates",
+    )
+    scan.add_argument(
         "--no-open",
         action="store_true",
         help="do not serve the report and open it in a browser",
@@ -222,6 +252,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
                 commit=checkout.commit,
                 ref=checkout.ref,
                 web_base_url=web_base_url(args.url),
+                similar=[] if args.no_similar else find_similar(skills, args.similarity),
             )
     except RepoError as exc:
         print(f"skill-atlas: {exc}", file=sys.stderr)
