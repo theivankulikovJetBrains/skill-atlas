@@ -143,14 +143,6 @@ class TtyStream(io.TextIOWrapper):
         return True
 
 
-@pytest.fixture
-def opened(monkeypatch: pytest.MonkeyPatch, no_server_loop: list[cli._ReportServer]) -> list[str]:
-    """Record what the CLI hands to the browser instead of launching one."""
-    urls: list[str] = []
-    monkeypatch.setattr(cli.webbrowser, "open", lambda url, *_a, **_kw: urls.append(url) or True)
-    return urls
-
-
 def free_port() -> int:
     """A port nothing is listening on -- as close to a guarantee as sockets allow."""
     with closing(socket.socket()) as probe:

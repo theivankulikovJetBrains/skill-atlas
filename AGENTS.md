@@ -141,6 +141,17 @@ Follow what the existing modules already do rather than importing a new style:
   local `file://` repositories; keep new tests offline the same way. Loopback is not the
   network — the report-server tests really bind a socket, but always on port 0, because a
   fixed 8888 would fail on whatever machine already has something there.
+- **Tests must not touch the developer's desktop either.** Three autouse fixtures in
+  `tests/conftest.py` see to that: `no_server_loop` keeps `serve_forever` from hanging the
+  run, `opened` keeps `webbrowser.open` from launching a real tab, and `intact_stdio` hands
+  the next test a `sys.stdout` that is still open. None of them goes red when it is missing,
+  which is why all three are autouse rather than opt-in: what normally hides their absence
+  is pytest's capture plugin — it makes `stdout.isatty()` false, so a scan skips the browser,
+  and it reinstalls `sys.stdout` between tests, so a leaked stream never surfaces. Run with
+  `-s` and both crutches go away. Ask for `opened` by name to assert on the URL.
+- Keep the suite green under `-s` as well as plain `uv run pytest`. It is what a developer
+  debugging a test reaches for, and it is the mode where anything the suite leaks into
+  process-global state stops being invisible.
 - Both platforms matter: CI runs Linux, Windows and macOS. Watch for path separators
   (repo-relative paths are always POSIX-style), file locking on Windows, and console
   encoding — see `_harden_stdio` in `cli.py`.
