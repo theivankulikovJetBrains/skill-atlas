@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
-from conftest import skill_md
+from conftest import nfc, skill_md
 
 from skill_atlas import cli
 from skill_atlas.repo import Checkout, RepoError
@@ -78,6 +78,36 @@ class TestScanCommand:
         assert cli.main(["scan", URL]) == 0
         assert "No skills found" in capsys.readouterr().out
         assert (in_tmp_cwd / "report.html").is_file()
+
+    def test_duplicated_skills_reach_both_outputs(self, fake_clone, in_tmp_cwd, capsys):
+        """A repo keeping one skill under .agents/ and .claude/ reports both copies."""
+        fake_clone(
+            {
+                ".agents/skills/deploy/SKILL.md": skill_md("deploy", "From .agents."),
+                ".claude/skills/deploy/SKILL.md": skill_md("deploy", "From .claude."),
+            }
+        )
+        assert cli.main(["scan", URL]) == 0
+
+        out = capsys.readouterr().out
+        assert "Found 2 skills:" in out
+        html = (in_tmp_cwd / "report.html").read_text(encoding="utf-8")
+        for path in (".agents/skills/deploy/SKILL.md", ".claude/skills/deploy/SKILL.md"):
+            assert path in out
+            assert path in html
+
+    def test_a_skill_in_an_odd_directory_survives_the_whole_pipeline(self, fake_clone, in_tmp_cwd, capsys):
+        fake_clone({"my skills/café (v2)/SKILL.md": skill_md("odd", "Lives somewhere strange.")})
+        assert cli.main(["scan", URL]) == 0
+
+        assert "my skills/café (v2)/SKILL.md" in nfc(capsys.readouterr().out)
+        html = nfc((in_tmp_cwd / "report.html").read_text(encoding="utf-8"))
+        assert "my skills/café (v2)/SKILL.md" in html
+
+    def test_report_can_be_written_into_an_odd_directory(self, fake_clone, in_tmp_cwd):
+        fake_clone()
+        assert cli.main(["scan", URL, "--out", "out dir (new)/atlas report.html"]) == 0
+        assert (in_tmp_cwd / "out dir (new)" / "atlas report.html").is_file()
 
     def test_clone_failure_exits_one_with_stderr_message(self, monkeypatch, capsys, in_tmp_cwd):
         @contextmanager

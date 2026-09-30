@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from conftest import skill_md
+from conftest import nfc, skill_md
 
 from skill_atlas.repo import RepoError, clone, web_base_url
 from skill_atlas.scanner import find_skills
@@ -76,6 +76,26 @@ def local_git_repo(tmp_path: Path) -> Path:
             "skills/lower/Skill.md": skill_md("case-variant"),
             "README.md": "# not a skill\n",
             "src/bulk.bin": "x" * 200_000,
+        },
+    )
+
+
+@pytest.fixture
+def awkward_git_repo(tmp_path: Path) -> Path:
+    """A repository whose layout stresses the sparse-checkout pattern itself.
+
+    Duplicated skills under both agent directories, plus a directory name with a
+    space and a non-ASCII character -- none of which the gitignore-style pattern
+    ``**/[Ss][Kk][Ii][Ll][Ll].[Mm][Dd]`` may quietly fail to match.
+    """
+    return _commit_repo(
+        tmp_path / "awkward-origin",
+        {
+            ".agents/skills/deploy/SKILL.md": skill_md("deploy", "From .agents."),
+            ".claude/skills/deploy/SKILL.md": skill_md("deploy", "From .claude."),
+            "my skills/café/SKILL.md": skill_md("odd"),
+            "plugins/ops/node_modules/pkg/SKILL.md": skill_md("vendored"),
+            "docs/README.md": "# not a skill\n",
         },
     )
 
@@ -157,6 +177,27 @@ class TestFetchesOnlySkills:
         with clone(local_git_repo.as_uri()) as checkout:
             names = {s.name for s in find_skills(checkout.path)}
         assert names == {"alpha", "root-level", "case-variant"}
+
+    def test_duplicated_and_awkwardly_placed_skills_all_arrive(self, awkward_git_repo: Path):
+        with clone(awkward_git_repo.as_uri()) as checkout:
+            materialised = {nfc(p) for p in self._worktree_files(checkout.path)}
+        assert materialised == {
+            ".agents/skills/deploy/SKILL.md",
+            ".claude/skills/deploy/SKILL.md",
+            "my skills/café/SKILL.md",
+            "plugins/ops/node_modules/pkg/SKILL.md",
+        }
+
+    def test_the_scan_keeps_both_copies_and_drops_the_vendored_one(self, awkward_git_repo: Path):
+        """git fetches every SKILL.md; the scanner is what rules node_modules out."""
+        with clone(awkward_git_repo.as_uri()) as checkout:
+            skills = find_skills(checkout.path)
+        assert [nfc(s.path) for s in skills] == [
+            ".agents/skills/deploy/SKILL.md",
+            ".claude/skills/deploy/SKILL.md",
+            "my skills/café/SKILL.md",
+        ]
+        assert [s.description for s in skills[:2]] == ["From .agents.", "From .claude."]
 
     def test_no_hooks_are_left_runnable_in_the_clone(self, local_git_repo: Path):
         """An empty template dir means git installs no hooks at all to begin with."""

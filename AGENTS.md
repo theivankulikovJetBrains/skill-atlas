@@ -19,8 +19,9 @@ Nothing is installed globally; everything runs through `uv` (Python ≥3.14, `gi
 | Run the CLI | `uv run skill-atlas scan <git repo url>` |
 | Build sdist + wheel | `uv build` |
 
-The suite is 105 tests and finishes in about 3 seconds — there is no reason to skip it or to
-run a subset as a final check.
+The suite is 184 tests and finishes in about 8 seconds — there is no reason to skip it or to
+run a subset as a final check. Two of them probe the filesystem and skip themselves where it
+cannot oblige: one needs case-sensitive names, the other needs symlinks.
 
 Add dependencies with `uv add <pkg>` (or `uv add --dev <pkg>`) so `uv.lock` moves with
 `pyproject.toml`; CI runs `--locked` and fails on a stale lock.
@@ -29,7 +30,7 @@ Add dependencies with `uv add <pkg>` (or `uv add --dev <pkg>`) so `uv.lock` move
 
 ```
 src/skill_atlas/
-  cli.py                     argparse wiring, exit codes, browser-opening policy
+  cli.py                     argparse wiring, exit codes, the report server and open policy
   repo.py                    clone(): shallow/blobless/sparse fetch into a temp dir
   scanner.py                 find_skills(): walk a tree, parse SKILL.md frontmatter
   report.py                  format_console() and write_html()
@@ -40,7 +41,8 @@ spec/cli.md                  the behaviour contract
 ```
 
 Data flows one way: `repo` → `scanner` → `models` → `report` → `cli`. Keep it that way;
-nothing below `cli.py` should print, and nothing should reach the network outside `repo.py`.
+nothing below `cli.py` should print, and nothing should reach the network outside `repo.py` —
+the report server in `cli.py` binds `127.0.0.1` and serves one in-memory document.
 
 ## Conventions
 
@@ -65,9 +67,13 @@ Follow what the existing modules already do rather than importing a new style:
 ### Tests
 
 - Build fixtures with the `make_repo` fixture and the `skill_md()` helper in
-  `tests/conftest.py` instead of writing files by hand.
+  `tests/conftest.py` instead of writing files by hand. Compare paths that contain
+  non-ASCII through `nfc()` from the same module — macOS can report a directory name
+  decomposed, so a bare `"café"` literal does not match what `os.walk` saw.
 - **Tests must not hit the network.** `repo.py` is tested by driving real `git` against
-  local `file://` repositories; keep new tests offline the same way.
+  local `file://` repositories; keep new tests offline the same way. Loopback is not the
+  network — the report-server tests really bind a socket, but always on port 0, because a
+  fixed 8888 would fail on whatever machine already has something there.
 - Both platforms matter: CI runs Linux, Windows and macOS. Watch for path separators
   (repo-relative paths are always POSIX-style), file locking on Windows, and console
   encoding — see `_harden_stdio` in `cli.py`.

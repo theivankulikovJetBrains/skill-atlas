@@ -22,6 +22,10 @@ def result(*skills: Skill, **overrides) -> ScanResult:
 ALPHA = Skill("alpha", "Formats things.", ".claude/skills/alpha/SKILL.md")
 BRAVO = Skill("bravo", "", "skills/bravo/SKILL.md", ("frontmatter is missing 'description'",))
 
+#: The same skill vendored under both agent directories, with the copies drifted apart.
+AGENTS_COPY = Skill("deploy", "From .agents.", ".agents/skills/deploy/SKILL.md")
+CLAUDE_COPY = Skill("deploy", "", ".claude/skills/deploy/SKILL.md", ("frontmatter is missing 'description'",))
+
 
 class TestConsoleOutput:
     def test_lists_name_path_and_description(self):
@@ -119,3 +123,55 @@ class TestHtmlReport:
         assert html.startswith("<!DOCTYPE html>")
         assert "<style>" in html
         assert "src=" not in html  # no external assets to fetch
+
+
+class TestDuplicateSkills:
+    """Copies of one skill must stay individually visible -- the drift is the finding."""
+
+    def test_console_lists_every_copy_with_its_own_path(self):
+        text = format_console(result(AGENTS_COPY, CLAUDE_COPY))
+        assert "Found 2 skills:" in text
+        assert text.count("  deploy") == 2
+        assert ".agents/skills/deploy/SKILL.md" in text
+        assert ".claude/skills/deploy/SKILL.md" in text
+
+    def test_console_attaches_each_issue_to_the_copy_that_has_it(self):
+        lines = format_console(result(AGENTS_COPY, CLAUDE_COPY)).splitlines()
+        flagged = lines.index("    ! frontmatter is missing 'description'")
+        # The warning belongs to the second copy, so it must follow that copy's path.
+        assert lines.index("    .claude/skills/deploy/SKILL.md") < flagged
+        assert lines.index("    .agents/skills/deploy/SKILL.md") < lines.index("    From .agents.")
+
+    def test_html_renders_one_row_per_copy(self, tmp_path: Path):
+        html = write_html(result(AGENTS_COPY, CLAUDE_COPY), tmp_path / "r.html").read_text(encoding="utf-8")
+        assert html.count('class="name"') == 2
+        assert "Skills found <b>2</b>" in html
+
+    def test_each_copy_links_to_its_own_file(self, tmp_path: Path):
+        html = write_html(result(AGENTS_COPY, CLAUDE_COPY), tmp_path / "r.html").read_text(encoding="utf-8")
+        for skill in (AGENTS_COPY, CLAUDE_COPY):
+            assert f'href="https://github.com/acme/widgets/blob/{"a" * 40}/{skill.path}"' in html
+
+
+class TestUnusualPaths:
+    def test_console_prints_an_odd_path_verbatim(self):
+        skill = Skill("odd", "Strange home.", "my skills/café (v2)/SKILL.md")
+        assert "my skills/café (v2)/SKILL.md" in format_console(result(skill))
+
+    def test_an_odd_path_is_still_linked(self, tmp_path: Path):
+        skill = Skill("odd", "Strange home.", "my skills/café/SKILL.md")
+        html = write_html(result(skill), tmp_path / "r.html").read_text(encoding="utf-8")
+        assert f'/blob/{"a" * 40}/my skills/café/SKILL.md"' in html
+
+    def test_a_path_cannot_break_out_of_the_href_attribute(self, tmp_path: Path):
+        """Directory names may legally contain quotes and ampersands on POSIX."""
+        skill = Skill("odd", "d", 'weird "dir" & co/SKILL.md')
+        html = write_html(result(skill), tmp_path / "r.html").read_text(encoding="utf-8")
+        assert 'weird "dir"' not in html
+        assert "&amp; co" in html
+        assert "&#34;" in html or "&quot;" in html
+
+    def test_an_issue_names_the_file_even_for_an_odd_path(self, tmp_path: Path):
+        skill = Skill("odd", "", "my skills/café/Skill.md", ("has no YAML frontmatter",))
+        html = write_html(result(skill), tmp_path / "r.html").read_text(encoding="utf-8")
+        assert "Skill.md has no YAML frontmatter" in html
