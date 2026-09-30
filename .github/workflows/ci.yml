@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install project
+        run: uv sync --locked
+
+      - name: Run tests
+        run: uv run pytest
+
+  package:
+    name: package and smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      # Scanning the checkout itself keeps this offline, and exercises the
+      # installed wheel rather than the source tree -- the one place a data
+      # file missing from the package (the report template) shows up.
+      # The report goes to a fresh path guarded by `test ! -e`: writing to a
+      # path that already holds a report would let the assertions below pass
+      # against the pre-existing copy even if this scan produced nothing.
+      - name: Scan this repository through the built wheel
+        run: |
+          out="$RUNNER_TEMP/smoke/report.html"
+          test ! -e "$out"
+          uv run --isolated --no-project --python 3.14 --with dist/*.whl \
+            skill-atlas scan "file://$PWD" -o "$out" --no-open
+          grep -q "<title>Skill Atlas" "$out"
+          grep -q "$(git rev-parse --short=12 HEAD)" "$out"
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-report
+          path: ${{ runner.temp }}/smoke/report.html

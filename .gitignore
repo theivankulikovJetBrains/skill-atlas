@@ -1,0 +1,12 @@
+# Generated report (default CLI output path)
+report.html
+
+# Python build / cache
+__pycache__/
+*.py[cod]
+dist/
+.venv/
+.pytest_cache/
+
+# Stray IDE module files; the project's own module is .idea/skill-atlas-on-github.iml
+/src/**/*.iml
