@@ -10,3 +10,10 @@ dist/
 
 # Stray IDE module files; the project's own module is .idea/skill-atlas-on-github.iml
 /src/**/*.iml
+
+# Per-machine Claude Code settings. .claude/settings.json and .claude/hooks/ are tracked on
+# purpose -- they carry the worktree policy -- so this has to name the local file exactly.
+.claude/settings.local.json
+# Worktrees belong beside the repo (../<feature>, per scripts/sbx-feature.sh), but an
+# EnterWorktree call without a path puts one here; ignored so it never reads as project files.
+.claude/worktrees/

@@ -29,6 +29,13 @@ Add dependencies with `uv add <pkg>` (or `uv add --dev <pkg>`) so `uv.lock` move
 
 ## Sandboxed feature development
 
+**This is mandatory, not a convenience.** Every feature is developed in its own worktree and
+sandbox; nothing is edited in the shared main checkout. `CLAUDE.md` states the rule for
+agents and `.claude/hooks/require-worktree.sh` enforces it, denying `Edit`/`Write` against
+the main checkout. The rule exists because the documentation alone did not hold: two features
+were once developed in one checkout at the same time, one silently overwrote the other's
+edits, and a `git checkout` carried uncommitted work onto an unrelated branch.
+
 `scripts/sbx-feature.sh` gives each feature its own git worktree *and* its own Docker
 Sandboxes container, so two features can be developed at once without sharing a checkout,
 a `.venv` or a `report.html`. Needs `sbx` (Docker Sandboxes) and a running JetBrains
