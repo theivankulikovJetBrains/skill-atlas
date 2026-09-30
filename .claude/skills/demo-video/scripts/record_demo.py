@@ -492,7 +492,7 @@ def merge_request_scope(project: Path, number: int) -> Scope:
     note on stderr rather than the run.
     """
     slug = origin_slug(project)
-    base, title = "", ""
+    base, title, merged = "", "", ""
     if slug and (token := github_token(project)):
         request = urllib.request.Request(
             f"https://api.github.com/repos/{slug}/pulls/{number}",
@@ -503,6 +503,8 @@ def merge_request_scope(project: Path, number: int) -> Scope:
             with urllib.request.urlopen(request, timeout=30) as answer:
                 payload = json.load(answer)
             base, title = payload["base"]["ref"], payload.get("title", "")
+            if payload.get("merged_at"):
+                merged = payload.get("merge_commit_sha") or ""
         except Exception as bad:  # noqa: BLE001 -- any failure here is the same fallback
             print(f"record_demo: could not read pull request {number} from the API ({bad}); "
                   f"falling back to a diff against main", file=sys.stderr)
@@ -513,6 +515,21 @@ def merge_request_scope(project: Path, number: int) -> Scope:
     # at once would overwrite each other's FETCH_HEAD between the fetch and the diff.
     ref = f"refs/demo-run/pull/{number}"
     git_out(project, "fetch", "--quiet", "origin", f"+refs/pull/{number}/head:{ref}")
+
+    # Once a merge request is merged, its head is an ancestor of the base branch, so
+    # `<base>...<head>` has no merge base left to speak of and comes out empty -- "this change
+    # is entirely already in main", which is true and useless. The merge commit's first parent
+    # is the base as it stood just before the merge, which is the diff the reader means. A
+    # squash keeps working (one parent, the same answer); a rebase merge does not, so the
+    # parent has to resolve before it is used and the base branch is the fallback.
+    if merged:
+        parent = git_out(project, "rev-parse", "--verify", "--quiet", f"{merged}^1",
+                         fatal=False).strip()
+        if parent:
+            return resolve_scope(project, f"{parent}...{ref}", f"PR #{number}", title)
+        print(f"record_demo: pull request {number} is merged but its merge commit's parent is "
+              f"not in this repository; diffing against {base} instead", file=sys.stderr)
+
     for candidate in (f"origin/{base}", base):
         if git_out(project, "rev-parse", "--verify", "--quiet", candidate, fatal=False).strip():
             base = candidate

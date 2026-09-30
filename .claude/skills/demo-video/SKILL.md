@@ -63,8 +63,11 @@ the film opens with a frame showing how the diff was read.
 Bare `--diff` works the base out (`origin/HEAD`, else `origin/main`, else `main`) and diffs
 `<base>...HEAD`; give it a range to be explicit. It reads **committed** work, so commit before
 filming — or pass a range like `--diff main` that includes the working tree. `--pr <number>`
-fetches `refs/pull/<n>/head` and asks the GitHub API for the base branch and title, through the
-token Git Credential Manager already holds; it needs the network, so it cannot be `--offline`.
+fetches `refs/pull/<n>/head` into `refs/demo-run/pull/<n>` and asks the GitHub API for the base
+branch and title, through the token Git Credential Manager already holds; it needs the network,
+so it cannot be `--offline`. It works on a **merged** merge request too, where it diffs against
+the merge commit's first parent — by then the head is an ancestor of the base branch, and
+`<base>...<head>` would come out empty.
 
 How a file becomes a set of scenarios is three tables in `record_demo.py`:
 
