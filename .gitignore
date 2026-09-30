@@ -5,6 +5,11 @@ report.html
 # Rebuilt from scratch on every run, so none of it is worth keeping.
 /demo-run/
 
+# Where `uv run pytest --shots` photographs the report at every check it makes against
+# it (tests/shots.py). Replaced wholesale by the next run; CI collects its own copy
+# outside the checkout and uploads that.
+/test-shots/
+
 # Python build / cache
 __pycache__/
 *.py[cod]

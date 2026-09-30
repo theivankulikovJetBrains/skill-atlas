@@ -6,6 +6,9 @@ from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 
 import pytest
+# By name, not as a module: the ``shots`` fixture below would shadow a module bound to
+# the same global, and ``pytest_configure`` would then look its class up on a function.
+from shots import Album, Collector
 
 from skill_atlas import cli
 
@@ -13,6 +16,103 @@ from skill_atlas import cli
 #: replaces them for every test in the suite.
 REAL_SERVE_FOREVER = cli._ReportServer.serve_forever
 SHIPPED_DEFAULT_PORT = cli.DEFAULT_PORT
+
+#: The session's screenshot collector. On the config rather than in a module global so
+#: ``pytest_sessionfinish`` can reach the same object the fixtures handed out.
+COLLECTOR = pytest.StashKey[Collector]()
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Flags for screenshot collection. See ``tests/shots.py`` for what they buy.
+
+    Each one has an environment variable behind it so a runner can switch collection on
+    without owning the pytest command line -- which is how the CI job does it for a
+    suite it otherwise invokes exactly as a developer does.
+    """
+    group = parser.getgroup("screenshots", "photograph the report at every check")
+    group.addoption(
+        "--shots",
+        action="store_true",
+        default=False,
+        help="collect a screenshot of the report at each check made against it, into "
+             "<rootdir>/test-shots (env: SKILL_ATLAS_SHOTS). Off by default: it needs a "
+             "browser and adds about a minute to a suite that otherwise runs in seconds.",
+    )
+    group.addoption(
+        "--shots-dir",
+        default=None,
+        metavar="PATH",
+        help="collect into somewhere else instead (env: SKILL_ATLAS_SHOTS_DIR). Spell it "
+             "--shots-dir=PATH, with the equals sign: pytest cannot know this option takes "
+             "a value until a conftest has loaded, and a separate argument that happens to "
+             "be an existing directory is taken for a test path instead -- which moves "
+             "rootdir and then loads no conftest at all. The environment variable has no "
+             "such problem, which is what the CI job uses it for.",
+    )
+    group.addoption(
+        "--shots-strict",
+        action="store_true",
+        default=False,
+        help="treat a browser that cannot be found or cannot render, or a run that "
+             "photographed nothing at all, as an error rather than as a skipped extra "
+             "(env: SKILL_ATLAS_SHOTS_STRICT). Implies --shots. What CI uses, so a green "
+             "run cannot ship an empty artifact.",
+    )
+    group.addoption(
+        "--shots-browser",
+        default=None,
+        metavar="PATH",
+        help="Chromium-family binary to render with (env: SKILL_ATLAS_SHOTS_BROWSER). "
+             "Microsoft Edge is found automatically; Chrome is not a substitute.",
+    )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.stash[COLLECTOR] = Collector.from_config(config)
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    collector = session.config.stash.get(COLLECTOR, None)
+    if collector is None:
+        return
+    collector.finish()
+    # A strict run that photographed nothing has passed its tests and produced no
+    # evidence, which is the one failure an artifact cannot show you: the upload
+    # succeeds and the directory is empty. Only ever turns a green run red, so it
+    # cannot mask the real failure in a run that was already red.
+    if collector.strict and not collector.shots and exitstatus == 0:
+        session.exitstatus = 1
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus: int, config: pytest.Config) -> None:
+    collector = config.stash.get(COLLECTOR, None)
+    if collector is None or collector.directory is None:
+        return
+    if collector.shots:
+        red = sum(1 for shot in collector.shots if not shot.passed)
+        terminalreporter.write_line(
+            f"screenshots: {len(collector.shots)} check moments photographed"
+            f"{f', {red} red' if red else ''} -> {collector.directory}"
+        )
+    else:
+        terminalreporter.write_line(
+            f"screenshots: nothing photographed -> {collector.directory}", yellow=True
+        )
+    if collector.broken:
+        terminalreporter.write_line(
+            f"screenshots: collection stopped early: {collector.broken}", yellow=True
+        )
+
+
+@pytest.fixture
+def shots(request: pytest.FixtureRequest) -> Album:
+    """Photograph the report at each check this test makes against it.
+
+    ``shots.page(report).check(label, condition)`` asserts the condition and leaves a
+    frame behind. With no ``--shots-dir`` it is the assert alone and no browser starts,
+    so a test written this way costs a default run nothing.
+    """
+    return request.config.stash[COLLECTOR].album(request.node.nodeid)
 
 
 @pytest.fixture(autouse=True)
