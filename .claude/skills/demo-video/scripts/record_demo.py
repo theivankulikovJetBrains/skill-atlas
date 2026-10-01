@@ -32,6 +32,7 @@ import os
 import queue
 import re
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -623,6 +624,61 @@ def piped_scenario(driver: Driver) -> Scenario:
     return step
 
 
+def terminate_tree(child: subprocess.Popen, timeout: float = 30.0) -> None:
+    """Stop a child *and everything it started*, which ``Popen.terminate`` does not.
+
+    The app is reached through ``uv run skill-atlas``, so the process this script holds is a
+    launcher with the real server below it: uv -> skill-atlas -> python. ``terminate()`` ended
+    the launcher and orphaned that pair, which went on serving, still bound to its port and
+    still holding the checkout open. The cost was never a red check -- this runs after the
+    last assertion -- so it showed up as the *next* thing to touch the worktree failing:
+    ``sbx-feature.sh rm`` unable to delete the directory, and ``uv sync`` refusing with
+    "Access is denied" on ``.venv\\Scripts\\skill-atlas.exe``, because the stray python was
+    holding its own executable open.
+
+    Measured, the leak was Windows-only: on POSIX ``uv run`` exec-replaces itself, so the pid
+    this script holds *is* the server and ``terminate()`` was always enough. Running the old
+    code on Linux leaks nothing. The group signal below is therefore insurance rather than a
+    fix -- it costs two lines, it is what keeps this correct if uv ever spawns instead of
+    execs, and ``start_new_session=True`` at launch has already made the child a group leader
+    for it. Windows has no group to signal, which is why that side needs taskkill to walk the
+    tree from the pid.
+    """
+    if child.poll() is not None:
+        return  # already gone, and its pid may belong to something else by now
+
+    if sys.platform == "win32":
+        # /T for the descendants, /F because the server is blocked in serve_forever and has
+        # nothing polling for a polite request. Output is captured and the exit code ignored:
+        # taskkill is chatty on success and says "process not found" when the child won the
+        # race above, and neither is news. The wait below is what decides.
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(child.pid)],
+                       capture_output=True, timeout=60)
+    else:
+        try:
+            os.killpg(os.getpgid(child.pid), signal.SIGTERM)
+        except OSError:
+            child.terminate()  # no group of its own, or already reaped
+
+    try:
+        child.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if sys.platform != "win32":
+            try:
+                os.killpg(os.getpgid(child.pid), signal.SIGKILL)
+            except OSError:
+                pass
+        child.kill()
+        try:
+            child.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # Reported rather than raised: every assertion this scenario makes has already
+            # been recorded, so a stray here is a cleanup problem to say out loud, not a
+            # reason to lose the run.
+            print(f"record_demo: pid {child.pid} outlived both signals -- check for a stray "
+                  f"skill-atlas still bound to its port", file=sys.stderr)
+
+
 def drain(fd: int) -> None:
     """Read and discard until the far end goes away.
 
@@ -723,11 +779,7 @@ def served_scenario(driver: Driver) -> Scenario:
         time.sleep(0.3)
 
     still_up = child.poll() is None
-    child.terminate()
-    try:
-        child.wait(timeout=30)
-    except subprocess.TimeoutExpired:
-        child.kill()
+    terminate_tree(child)  # the whole tree: see terminate_tree for what terminate() left behind
     if leader != -1:
         os.close(leader)  # ends the drain thread, which is daemonised anyway
 
