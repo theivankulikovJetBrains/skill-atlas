@@ -208,6 +208,38 @@ the mechanism; what matters when writing tests:
   rows, the matrix — is still that skill's question, and a new claim about behaviour
   belongs in its `ui_steps()`, not here.
 
+### The demo GIF on a pull request
+
+The `demo gif` job runs the `demo-video` skill with `--gif --offline` and posts the film as
+one inline comment, so a reviewer sees the app working without checking the branch out.
+`.github/scripts/publish-demo-gif.sh` does the publishing; the job is the skill, not a
+second implementation of it, so a scenario added to `cli_scenarios()` or `ui_steps()` shows
+up here with no workflow change.
+
+- **It is a check, like `screenshots`.** The recorder exits non-zero when any scenario is
+  red, which fails the job; the comment then *names* the red scenarios above the film,
+  from `summary.json`. The GIF is evidence of a run and never the verdict — do not read a
+  posted film as a green run, and do not report CI green off the strength of one.
+- **Don't paste the film into the PR body.** The comment is updated in place, one per pull
+  request, so a hand-pasted copy is a second thing to keep current. Nor should you run the
+  skill by hand just to open a PR — the job does it.
+- **The GIF lives on an orphan `demo-assets` branch**, never on `main`: GitHub has no API
+  for attaching a file to a comment, so an inline image has to be a URL, and the asset
+  branch keeps generated output out of `main`'s history. Paths are keyed by head commit
+  (`pr-<n>/<sha>.gif`) because GitHub's image proxy caches by URL, and each run clears its
+  own `pr-<n>/` first, so the branch holds about one GIF per pull request rather than one
+  per push. Leave that branch alone; nothing reads it but the comments.
+- **Fork pull requests skip the job.** Their `pull_request` token is read-only, so the push
+  and the comment would both 403. They get the `demo-gif` artifact instead, and a
+  maintainer can run the workflow by hand on the branch.
+- **`--offline`, deliberately.** The one over-the-network scenario clones a public repo
+  whose contents change, and this job comments on every push, so a flake there would post a
+  wrong comment rather than cost a retryable tick.
+- **It needs `--no-sandbox` on the runner**, for the same AppArmor reason `tests/shots.py`
+  documents at length. `sandbox_flags()` in `record_demo.py` is a deliberate copy of that
+  one; keep the two in step, because a frame CI cannot photograph is a frame the comment
+  has to do without.
+
 ## Definition of Done
 
 1. `uv run pytest` is green locally.

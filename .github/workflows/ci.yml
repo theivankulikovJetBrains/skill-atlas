@@ -77,6 +77,77 @@ jobs:
           name: report-screenshots
           path: ${{ runner.temp }}/shots
 
+  # The demo-video skill, run in CI, and its GIF posted onto the pull request so a reviewer
+  # sees the app working without checking the branch out. Like `screenshots` this is a check
+  # that happens to produce a picture: the recorder exits non-zero when any scenario is red,
+  # which fails this job, and the comment then names the red ones rather than quietly showing
+  # a film of a broken app.
+  demo:
+    name: demo gif
+    runs-on: ubuntu-latest
+    # A fork's `pull_request` token is read-only and gets no secrets, so both the push to the
+    # asset branch and the comment would 403. Skipping leaves a fork's pull request green with
+    # the artifact below instead of a red check nobody on that side can fix; a maintainer who
+    # wants the film can still get it from workflow_dispatch on the branch.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    permissions:
+      contents: write        # pushes the GIF to the asset branch
+      pull-requests: write   # posts, or updates, the one comment
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install project
+        run: uv sync --locked
+
+      # --offline on purpose. The one over-the-network scenario clones a public repository
+      # whose contents can change under the run, and this job posts to the pull request on
+      # every push, so a flake here is a wrong comment rather than a retryable red tick.
+      # The skill's own docs call --offline green rather than degraded: the report steps fall
+      # back to the `atlas` fixture and only that single scan is dropped.
+      #
+      # python3, not python: the runner image has no unversioned alias. Edge comes with the
+      # image, which is why record_demo.py finds it at /usr/bin/microsoft-edge -- and why it
+      # passes --no-sandbox there, as tests/shots.py does, or it would write no frames at all.
+      - name: Record every scenario as a GIF
+        run: python3 .claude/skills/demo-video/scripts/record_demo.py --gif --offline
+
+      # always(): a red run is the one where the film and the transcript are worth reading,
+      # and it is also the case the comment below leads with. The artifact is what a fork's
+      # pull request gets instead of a comment.
+      - name: Upload the GIF and the transcript
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-gif
+          path: |
+            demo-run/demo.gif
+            demo-run/transcript.md
+            demo-run/summary.json
+
+      - name: Publish it onto the pull request
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GIF: demo-run/demo.gif
+          SUMMARY: demo-run/summary.json
+          PR: ${{ github.event.pull_request.number }}
+          # head.sha, not github.sha: on a pull_request event the latter is the ephemeral
+          # merge commit, which is no use as a cache-busting key a reviewer can recognise.
+          SHA: ${{ github.event.pull_request.head.sha }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+          REPO: ${{ github.repository }}
+          BRANCH: demo-assets
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: .github/scripts/publish-demo-gif.sh
+
   package:
     name: package and smoke test
     runs-on: ubuntu-latest
