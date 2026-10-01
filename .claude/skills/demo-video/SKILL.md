@@ -62,8 +62,14 @@ demo-run/
 ```
 
 The last run: **37 scenarios, 145 assertions, 2m17s of film** at 1280×900 — and 40 of 40 under
-`--offline --gif`, which drops only the over-the-network scan: 59 frames, 136s, **3.1 MB** of
-GIF at 960×675.
+`--offline --gif`, which drops only the over-the-network scan: 59 frames, 136s of GIF at
+960×675.
+
+Expect the GIF to land somewhere around **3–4.5 MB**, and do not read a shift inside that band
+as a regression. The global palette is median-cut over a sample of the frames, so a changed
+port number or scan timestamp can pick a slightly different palette, and one that fits the
+frames less well dithers more and compresses worse. Frame count and duration are the stable
+numbers; bytes are not.
 
 `summary.json` carries `scenarios`, `passed`, `assertions`, a `red` list naming each failed
 scenario with its verdict, and the output's `video`/`bytes`/`note`. It exists so CI can put the

@@ -37,6 +37,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -621,13 +622,32 @@ def piped_scenario(driver: Driver) -> Scenario:
     return step
 
 
+def drain(fd: int) -> None:
+    """Read and discard until the far end goes away.
+
+    A pty whose buffer fills blocks whoever is writing to it, and the child here is meant to
+    go on serving, so somebody has to keep reading. Nothing wants the bytes: this scenario's
+    checks come from HTTP and from the $BROWSER recorder, not from what the scan printed.
+    """
+    try:
+        while os.read(fd, 65536):
+            pass
+    except OSError:
+        pass  # EIO when the child closes its side, EBADF when we close ours. Both are the end.
+
+
 def served_scenario(driver: Driver) -> Scenario:
     """The serve-and-open path, which only happens when stdout is a terminal.
 
     CREATE_NO_WINDOW is what makes this testable from an agent's shell: the child gets a real
     console -- so isatty() is true and the server starts -- but no window appears, and $BROWSER
-    catches the open instead of a browser. Elsewhere the same effect needs a pty, so on
-    non-Windows the run is started in its own session with a pty if one can be had.
+    catches the open instead of a browser.
+
+    Everywhere else that takes a pty, and it has to be a real one. `start_new_session` alone
+    is not enough and used to be all this did: a new session leader still inherits the
+    parent's stdout, which under a CI runner is a captured pipe, so isatty() was false, the
+    server never started and all five checks below failed at once. That is why this scenario
+    was green on Windows and red the first time the demo job ran on Linux.
     """
     port = free_port()
     report = driver.work / "reports" / "served.html"
@@ -638,11 +658,22 @@ def served_scenario(driver: Driver) -> Scenario:
     driver.opened.unlink(missing_ok=True)
 
     kwargs: dict[str, object] = {}
+    leader = follower = -1
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     else:
-        kwargs["start_new_session"] = True
+        import pty  # POSIX-only, so it is imported where it is used rather than at the top
+
+        leader, follower = pty.openpty()
+        # stderr goes to the same pty: the app hardens its streams together, and a scan that
+        # warned on a pipe while printing to a terminal would be a different scenario.
+        kwargs.update(stdout=follower, stderr=follower, start_new_session=True)
     child = subprocess.Popen(argv, cwd=str(driver.project), env=driver.env, **kwargs)  # type: ignore[arg-type]
+    if follower != -1:
+        # Our copy goes now that the child holds one: while this end stays open the pty never
+        # reports EOF, so the drain below would never finish.
+        os.close(follower)
+        threading.Thread(target=drain, args=(leader,), daemon=True).start()
 
     url = f"http://localhost:{port}/"
     body, status, deadline = "", 0, time.monotonic() + 90
@@ -681,6 +712,8 @@ def served_scenario(driver: Driver) -> Scenario:
         child.wait(timeout=30)
     except subprocess.TimeoutExpired:
         child.kill()
+    if leader != -1:
+        os.close(leader)  # ends the drain thread, which is daemonised anyway
 
     add = step.checks.append
     add(Check("GET / status", str(status), "200", status == 200))
