@@ -172,7 +172,10 @@ existing="$(gh api --paginate "repos/${REPO}/issues/${PR}/comments" \
   | head -n1)"
 
 if [ -n "$existing" ]; then
-  gh api -X PATCH "repos/${REPO}/issues/${PR}/comments/${existing}" \
+  # `issues/comments/<id>`, with no issue number in it. Editing an issue comment is keyed by
+  # comment id alone; `issues/<n>/comments/<id>` is not an endpoint and answers 404, which is
+  # how this failed on the second run -- the first one only ever took the POST branch below.
+  gh api -X PATCH "repos/${REPO}/issues/comments/${existing}" \
     -F "body=@${body}" --silent
   echo "updated comment ${existing}"
 else
