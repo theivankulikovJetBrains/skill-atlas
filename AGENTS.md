@@ -208,6 +208,49 @@ the mechanism; what matters when writing tests:
   rows, the matrix — is still that skill's question, and a new claim about behaviour
   belongs in its `ui_steps()`, not here.
 
+### The demo GIF on a pull request
+
+The `demo gif` job runs the `demo-video` skill with `--gif --offline`, publishes the film to
+an orphan `demo-assets` branch and keeps one comment on the pull request linking it, so a
+reviewer can watch the app work without checking the branch out.
+`.github/scripts/publish-demo-gif.sh` does the publishing; the job is the skill, not a
+second implementation of it, so a scenario added to `cli_scenarios()` or `ui_steps()` shows
+up here with no workflow change.
+
+- **Linked, not embedded, because the repository is private.** An `![](...)` pointing at
+  `raw.githubusercontent.com` renders broken: that host answers 404 without a token, and
+  GitHub does not proxy same-repo raw URLs through camo — it leaves them bare for the
+  browser, which cannot authenticate to another domain. Measured, not assumed: 200 and
+  3.5 MB with a token, 404 without. The comment therefore links
+  `github.com/<repo>/blob/demo-assets/...`, which is on the session's own domain and
+  animates the GIF in GitHub's viewer. **Do not "simplify" that link into an embed** unless
+  the repository goes public, at which point an embed is the nicer thing and the script says
+  so too.
+
+- **It is a check, like `screenshots`.** The recorder exits non-zero when any scenario is
+  red, which fails the job; the comment then *names* the red scenarios above the link,
+  from `summary.json`. The GIF is evidence of a run and never the verdict — do not read a
+  posted film as a green run, and do not report CI green off the strength of one.
+- **Don't paste the film into the PR body.** The comment is updated in place, one per pull
+  request, so a hand-pasted copy is a second thing to keep current. Nor should you run the
+  skill by hand just to open a PR — the job does it.
+- **The GIF lives on an orphan `demo-assets` branch**, never on `main`: GitHub has no API
+  for attaching a file to a comment, so the film has to live at a URL, and the asset branch
+  keeps generated output out of `main`'s history. Paths are keyed by head commit
+  (`pr-<n>/<sha>.gif`) so the link names the commit it is a film of, and each run clears its
+  own `pr-<n>/` first, so the branch holds about one GIF per pull request rather than one
+  per push. Leave that branch alone; nothing reads it but the comments.
+- **Fork pull requests skip the job.** Their `pull_request` token is read-only, so the push
+  and the comment would both 403. They get the `demo-gif` artifact instead, and a
+  maintainer can run the workflow by hand on the branch.
+- **`--offline`, deliberately.** The one over-the-network scenario clones a public repo
+  whose contents change, and this job comments on every push, so a flake there would post a
+  wrong comment rather than cost a retryable tick.
+- **It needs `--no-sandbox` on the runner**, for the same AppArmor reason `tests/shots.py`
+  documents at length. `sandbox_flags()` in `record_demo.py` is a deliberate copy of that
+  one; keep the two in step, because a frame CI cannot photograph is a frame the comment
+  has to do without.
+
 ## Definition of Done
 
 1. `uv run pytest` is green locally.

@@ -1,12 +1,13 @@
 ---
 name: demo-video
-description: Run skill-atlas locally through every user scenario in spec/cli.md and film the run as demo.mp4. Use when asked to run or demo the app end to end, to exercise all scenarios or all the flags, to record a video/screencast/demo/GIF of it working, or to show a change working in the real app rather than in tests.
+description: Run skill-atlas locally through every user scenario in spec/cli.md and film the run as demo.mp4, or as demo.gif with --gif. Use when asked to run or demo the app end to end, to exercise all scenarios or all the flags, to record a video/screencast/demo/GIF of it working, or to show a change working in the real app rather than in tests.
 ---
 
 # Run every scenario and film it
 
 One command runs the app for real — real `git` fetches, real reports on disk, real HTTP
-against the real report server — and turns the run into `demo-run/demo.mp4`.
+against the real report server — and turns the run into `demo-run/demo.mp4`, or
+`demo-run/demo.gif` with `--gif`.
 
 It is a **verifier that films itself**, not a screen recorder. Every frame carries the
 assertion that decides that scenario, so a red run is a finding to report rather than a nice
@@ -23,11 +24,14 @@ artifacts, it never edits the tree, so `CLAUDE.md`'s isolation rule does not app
 present. Any Python 3.11+ on PATH will do — it drives `uv run` rather than importing the app,
 so it does not need the project's 3.14 venv.
 
-About **70 seconds** warm. A first run adds a clone of the public repo and, if there is no
-`ffmpeg` on PATH, a one-off ~30 MB `imageio-ffmpeg` download.
+About **70 seconds** warm. A first run adds a clone of the public repo and, for an mp4 with no
+`ffmpeg` on PATH, a one-off ~30 MB `imageio-ffmpeg` download. `--gif` needs neither — it wants
+Pillow instead, which it borrows from a throwaway `uv` environment if the interpreter running
+it has none.
 
 | Flag | Why |
 |---|---|
+| `--gif` | write `demo.gif` instead of `demo.mp4` — what CI publishes for a pull request to link |
 | `--offline` | skip the one over-the-network scenario; everything else uses local fixtures |
 | `--repo <url>` | a different public repo for that scenario (default `anthropics/skills`) |
 | `--project <path>` | film a different checkout, e.g. a feature worktree |
@@ -35,6 +39,7 @@ About **70 seconds** warm. A first run adds a clone of the public repo and, if t
 | `--workers <n>` | concurrent Edge launches (default 4); drop to 1 if frames come out blank |
 | `--keep` | leave the scratch directory behind, which is how you debug a bad frame |
 | `--edge <path>` | if `msedge.exe` is somewhere unusual |
+| `--gif-width <px>` | downscale the GIF (default 960); `0` keeps 1280 at roughly double the bytes |
 
 `--fps`, `--timeout`, `--work-dir` and `--quiet` are there too; `--help` lists everything.
 
@@ -46,21 +51,50 @@ gains a skill.
 
 ## What you get
 
-Two files, about 3 MB:
+Three files, about 3 MB:
 
 ```
 demo-run/
   demo.mp4          the film: title card, every scenario, a summary of all of them
+                    (demo.gif under --gif)
   transcript.md     every command, its output, and every assertion with its verdict
+  summary.json      the same verdict in the shape a script can read
 ```
 
-The last run: **37 scenarios, 145 assertions, 2m17s of film** at 1280×900 — and 36 of 36 under
-`--offline`, which drops only the over-the-network scan.
+The last run: **37 scenarios, 145 assertions, 2m17s of film** at 1280×900 — and 40 of 40 under
+`--offline --gif`, which drops only the over-the-network scan: 59 frames, 136s of GIF at
+960×675.
+
+Expect the GIF to land somewhere around **3–4.5 MB**, and do not read a shift inside that band
+as a regression. The global palette is median-cut over a sample of the frames, so a changed
+port number or scan timestamp can pick a slightly different palette, and one that fits the
+frames less well dithers more and compresses worse. Frame count and duration are the stable
+numbers; bytes are not.
+
+`summary.json` carries `scenarios`, `passed`, `assertions`, a `red` list naming each failed
+scenario with its verdict, and the output's `video`/`bytes`/`note`. It exists so CI can put the
+tally beside the film it posts without parsing prose out of `transcript.md` — read
+`transcript.md` yourself, but reach for this from a script.
 
 **Read `transcript.md` and report from it.** Say how many scenarios were green, name any that
 were not, and quote the assertion that failed. Do not describe the video as proof that the app
 works — the assertions are the proof, and the transcript is where they are written down. Point
 the user at `demo-run/demo.mp4`; offer to open it rather than opening it unasked.
+
+## On a pull request, this runs itself
+
+The `demo gif` job in `.github/workflows/ci.yml` runs exactly this with `--gif --offline`,
+publishes the GIF to an orphan `demo-assets` branch and keeps one comment on the pull request
+linking it, so a reviewer can watch the app work without checking the branch out. **You do not
+need to run this by hand before opening a PR**, and the film does not belong in the PR body —
+`.github/scripts/publish-demo-gif.sh` keeps a single comment up to date per pull request. Run
+it locally when you want the film *now*, when you are iterating on the scenario list, or when
+the job has gone red and you are finding out why.
+
+The comment links the GIF rather than embedding it, because this repository is private and an
+embedded `raw.githubusercontent.com` image renders broken: that host needs a token and GitHub
+leaves same-repo raw URLs unproxied. The script's header has the measurements and says what to
+do differently if the repository ever goes public.
 
 ## Nothing is left behind, and nothing is visible to git
 
@@ -114,9 +148,27 @@ Four decisions in `record_demo.py` look arbitrary and are not. Preserve them:
   script, which is how the run proves the browser was handed the port that was actually bound
   without a real tab opening. Python honours `$BROWSER` on every platform.
 
-The video is assembled by `ffmpeg` — from PATH, or from `imageio-ffmpeg`, which the script
-fetches through `uv run --with` if it has to. With no ffmpeg at all it falls back to an
-animated GIF through Pillow, and says so.
+The mp4 is assembled by `ffmpeg` — from PATH, or from `imageio-ffmpeg`, which the script
+fetches through `uv run --with` if it has to. With no ffmpeg at all it falls back to a GIF,
+and says so.
+
+`--gif` takes the Pillow path deliberately rather than as a fallback — GitHub's file viewer
+animates a GIF on open, and a GIF is the only one of the two formats that could be embedded in
+a comment if this repository ever stopped being private. Two things about it are calibrated
+rather than arbitrary:
+
+- **One GIF frame per storyboard frame, carrying its own delay** — not resampled to a frame
+  rate the way the mp4 is. The film is stills held for seconds at a time, and GIF stores every
+  pixel of every frame, so a frame rate would spend 1400 frames saying what 59 say already:
+  the difference between 3 MB and a few hundred.
+- **One global 128-colour palette, sampled from a thumbnail of every frame.** The title card,
+  the terminal frames and the light report frames share no colour scheme, so a palette taken
+  from the first frame posterises the rest, and a local table per frame would be stored 59
+  times over.
+
+Pillow is never imported at module scope: the script has to start under whatever `python` is on
+PATH, so `assemble_gif` re-enters this same file through `uv run --no-project --with pillow`
+(`--gif-assemble <manifest>`) when the running interpreter has no Pillow of its own.
 
 ## When something is off
 
