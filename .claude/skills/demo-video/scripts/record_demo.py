@@ -649,6 +649,16 @@ def served_scenario(driver: Driver) -> Scenario:
     parent's stdout, which under a CI runner is a captured pipe, so isatty() was false, the
     server never started and all five checks below failed at once. That is why this scenario
     was green on Windows and red the first time the demo job ran on Linux.
+
+    A pty is necessary and not sufficient, which cost a second red run to find out:
+    `_should_open` in cli.py gates on `_has_display()` as well, and a Linux CI runner is
+    headless, so DISPLAY is set below too. That is a stand-in and not a cheat -- it is the
+    same move as $BROWSER, which this scenario already relies on. $BROWSER takes precedence
+    over everything in `webbrowser`, so the open still lands in the recorder script and no
+    real browser is consulted; what DISPLAY buys is only that the app believes a human with a
+    graphical session is waiting, which is the path this scenario is about. The headless-Linux
+    behaviour itself is not skipped anywhere -- CLI-16 asserts it, and
+    `test_headless_linux_is_left_alone` pins it.
     """
     port = free_port()
     report = driver.work / "reports" / "served.html"
@@ -659,6 +669,7 @@ def served_scenario(driver: Driver) -> Scenario:
     driver.opened.unlink(missing_ok=True)
 
     kwargs: dict[str, object] = {}
+    env = dict(driver.env)  # a copy: only this scenario wants a display
     leader = follower = -1
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
@@ -669,7 +680,11 @@ def served_scenario(driver: Driver) -> Scenario:
         # stderr goes to the same pty: the app hardens its streams together, and a scan that
         # warned on a pipe while printing to a terminal would be a different scenario.
         kwargs.update(stdout=follower, stderr=follower, start_new_session=True)
-    child = subprocess.Popen(argv, cwd=str(driver.project), env=driver.env, **kwargs)  # type: ignore[arg-type]
+        if sys.platform.startswith("linux") and not (
+            env.get("DISPLAY") or env.get("WAYLAND_DISPLAY")
+        ):
+            env["DISPLAY"] = ":99"  # see the docstring: a stand-in, like $BROWSER
+    child = subprocess.Popen(argv, cwd=str(driver.project), env=env, **kwargs)  # type: ignore[arg-type]
     if follower != -1:
         # Our copy goes now that the child holds one: while this end stays open the pty never
         # reports EOF, so the drain below would never finish.
