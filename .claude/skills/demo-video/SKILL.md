@@ -109,6 +109,14 @@ What lands in the checkout is the video and the transcript, under a `demo-run/` 
 `--out-dir` puts them somewhere git *can* see, the run says so on stderr rather than letting a
 3 MB video turn up in `git status`.
 
+No **process** is left behind either, which took a fix to become true. The serve-and-open
+scenario is the one step that starts something meant to outlive its own command, and
+`terminate_tree` is what stops it — the whole tree, not the handle this script holds. See its
+docstring for what the plain `terminate()` used to leave running; the short version is that a
+leak here costs nothing during the run and then breaks the *next* thing to touch the worktree.
+If you ever find a `skill-atlas` still bound to a port after a run, that is a regression in
+`terminate_tree` and not a quirk of the box.
+
 ## Keeping "every scenario" true
 
 `spec/cli.md` is the behaviour contract, and the scenario list in `record_demo.py` is a
@@ -129,7 +137,7 @@ proves, in the imperative.
 
 ## How it works, and why each part is like that
 
-Four decisions in `record_demo.py` look arbitrary and are not. Preserve them:
+Five decisions in `record_demo.py` look arbitrary and are not. Preserve them:
 
 - **Edge, not Chrome.** Chrome forwards the command line to an already-running instance and
   `--screenshot` silently produces nothing.
@@ -146,7 +154,15 @@ Four decisions in `record_demo.py` look arbitrary and are not. Preserve them:
   `stdout.isatty()`, so a captured pipe never reaches it; a child with its own console is a
   terminal without a window appearing on anyone's desktop. `$BROWSER` points at a recorder
   script, which is how the run proves the browser was handed the port that was actually bound
-  without a real tab opening. Python honours `$BROWSER` on every platform.
+  without a real tab opening. Python honours `$BROWSER` on every platform. Off Windows the
+  same effect needs a real pty *and* a `DISPLAY`, because `_should_open` in `cli.py` gates on
+  both — one gate at a time cost two red CI runs to find.
+- **`terminate_tree`, not `child.terminate()`, to stop that scenario's server.** The app is
+  reached through `uv run skill-atlas`, so on Windows the handle this script holds is a
+  launcher with the server two levels below it, and ending the launcher orphaned the rest. The
+  five checks still passed — the kill happens after the last assertion — so the symptom landed
+  on whatever touched the worktree next. On POSIX `uv run` execs and the old code was already
+  fine; the process-group signal is insurance, not a fix.
 
 The mp4 is assembled by `ffmpeg` — from PATH, or from `imageio-ffmpeg`, which the script
 fetches through `uv run --with` if it has to. With no ffmpeg at all it falls back to a GIF,
