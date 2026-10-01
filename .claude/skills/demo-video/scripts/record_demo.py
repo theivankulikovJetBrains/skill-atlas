@@ -15,8 +15,8 @@ Three things happen here, in order:
   2. Every report-UI scenario is driven headlessly in Edge. One launch per frame both
      screenshots the page and dumps the DOM, so the picture and the assertions come from the
      same render and cannot disagree.
-  3. The frames become demo.mp4 -- or demo.gif under `--gif`, which is what a pull request
-     can render inline; see `assemble_gif`.
+  3. The frames become demo.mp4 -- or demo.gif under `--gif`, which is what CI publishes for
+     a pull request to link; see `assemble_gif`.
 
 Why frames and not a screen recorder: nothing on this box can film a desktop, and a
 recording of a window would be unreproducible anyway. A storyboard of deterministic frames
@@ -57,7 +57,8 @@ EDGE_CANDIDATES = (
 #: Default width of `--gif`, in pixels. Narrower than the 1280 the frames are rendered at
 #: because GIF has no interframe compression worth the name: every pixel of every frame is
 #: paid for, so halving the area roughly halves the file. 960 still leaves the terminal text
-#: and the report's table legible at the size GitHub renders a comment image.
+#: and the report's table legible -- checked by reading frames back out of a finished GIF,
+#: not assumed.
 GIF_WIDTH = 960
 
 #: Colours in the GIF's single global palette. The report is a flat dark UI -- a handful of
@@ -1557,9 +1558,11 @@ def assemble(
 ) -> tuple[Path | None, str]:
     """Turn the captured frames into one file, and say what came out.
 
-    `--gif` is a real request and not a degraded mode: it is the one format a pull request
-    comment renders inline, which is what `.github/workflows/ci.yml` publishes. An mp4 asked
-    for on a box with no ffmpeg anywhere still falls back to a GIF, as it always has.
+    `--gif` is a real request and not a degraded mode: it is what `.github/workflows/ci.yml`
+    publishes for a pull request, because GitHub's own file viewer animates a GIF on open --
+    and because a GIF is the only one of the two that could be embedded in a comment if this
+    repository ever stopped being private. An mp4 asked for on a box with no ffmpeg anywhere
+    still falls back to a GIF, as it always has.
     """
     shots = [f for f in frames if f.png]
     if not shots:
@@ -1662,9 +1665,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="skip the network scenario and use the local fixtures only")
     parser.add_argument("--edge", default=None, help="path to msedge.exe")
     parser.add_argument("--gif", action="store_true",
-                        help="write demo.gif instead of demo.mp4 -- the format a pull "
-                             "request renders inline. Needs Pillow, fetched through uv if "
-                             "it is not already importable")
+                        help="write demo.gif instead of demo.mp4 -- what CI publishes for a "
+                             "pull request to link. Needs Pillow, fetched through uv if it "
+                             "is not already importable")
     parser.add_argument("--gif-width", type=int, default=GIF_WIDTH,
                         help=f"downscale the GIF to this width (default {GIF_WIDTH}); 0 "
                              f"keeps the full {WIDTH}px, at roughly double the bytes")

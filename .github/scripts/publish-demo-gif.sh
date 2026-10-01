@@ -1,13 +1,24 @@
 #!/usr/bin/env bash
 #
-# Put the demo GIF somewhere a pull request can render it, and point one comment at it.
+# Put the demo GIF where a reviewer can watch it, and point one comment at it.
 #
-# GitHub has no API for attaching a file to a comment. The drag-and-drop uploader in the web
-# UI is a private endpoint a workflow cannot reach, so an inline demo has to be a URL the
-# markdown renderer can fetch. The cheapest durable host is this repository itself: a branch
-# carrying nothing but these GIFs, with no connection to `main`'s history, so a clone that
-# does not ask for it never pays for it and `main` stays free of generated output -- the rule
-# `.agents/automations/review.md` already enforces for `demo-run/`.
+# GitHub has no API for attaching a file to a comment -- the drag-and-drop uploader in the web
+# UI is a private endpoint a workflow cannot reach -- so the film has to live at a URL. The
+# cheapest durable host is this repository itself: a branch carrying nothing but these GIFs,
+# with no connection to `main`'s history, so a clone that does not ask for it never pays for
+# it and `main` stays free of generated output, the rule `.agents/automations/review.md`
+# already enforces for `demo-run/`.
+#
+# Linked, not embedded, and that is not a style choice. This repository is private. An
+# `![](...)` pointing at raw.githubusercontent.com renders broken here: that host answers 404
+# without a token, and GitHub does not proxy same-repo raw URLs through camo -- it leaves them
+# bare for the browser to fetch, which cannot authenticate to a different domain. Verified
+# both ways: the URL is 200 and 3.5 MB with a token, 404 without one. So the comment links
+# github.com/<repo>/blob/... instead, which is on the session's own domain and animates the
+# GIF in GitHub's viewer for anyone who can see the repository.
+#
+# If this repository ever goes public, an embed becomes possible and is the nicer thing;
+# until then do not "fix" the link into an `![](...)`.
 #
 # Driven by .github/workflows/ci.yml; every input arrives in the environment:
 #
@@ -18,6 +29,7 @@
 #   BASE       the branch it was merged with to record it
 #   REPO       owner/name
 #   BRANCH     the asset branch
+#   SERVER_URL github.server_url; defaults to github.com, set for a GHES host
 #   RUN_URL    link back to the run, for the comment footer
 #   GH_TOKEN   read by `gh`; needs contents:write and pull-requests:write
 #
@@ -42,12 +54,11 @@ for required in "$GIF" "$SUMMARY"; do
   fi
 done
 
-# Keyed by commit, not a fixed name like `latest.gif`: GitHub serves comment images through
-# its camo proxy, which caches by URL, so a stable path would keep showing the first commit's
-# film for the life of the pull request.
+# Keyed by commit, not a fixed name like `latest.gif`, so the link names the commit it is a
+# film of and a reader can tell a stale comment from a current one at a glance.
 dir="pr-${PR}"
 rel="${dir}/${SHA}.gif"
-url="https://raw.githubusercontent.com/${REPO}/${BRANCH}/${rel}"
+url="${SERVER_URL:-https://github.com}/${REPO}/blob/${BRANCH}/${rel}"
 
 # One scratch root for the run, so a retry that dies partway still leaves nothing behind.
 WORK="$(mktemp -d)"
@@ -140,9 +151,14 @@ body="$(mktemp -p "$WORK")"
     jq -r '.red[] | "- `\(.id)` \(.caption) — \(.verdict)"' "$SUMMARY"
     printf '\n'
   fi
-  printf '![Every scenario in spec/cli.md, run for real](%s)\n\n' "$url"
-  printf '<sub>%s MB · ' "$megabytes"
-  printf '`transcript.md` and this GIF are on the run as artifacts'
+  printf '**[▶ Watch demo.gif (%s MB)](%s)** — every scenario in `spec/cli.md`, run for real.\n\n' \
+    "$megabytes" "$url"
+  # Says why it is a link and not an embed, so the next reader does not "simplify" it into one
+  # and ship a broken image. Same reason the rationale is in the header above.
+  printf '<sub>Linked rather than embedded because this repository is private: GitHub leaves '
+  printf 'same-repo raw URLs unproxied, and that host needs a token, so an inline image '
+  printf 'renders broken. The link opens in GitHub'"'"'s viewer, which animates it. · '
+  printf '`transcript.md` and the GIF are also on the run as artifacts'
   if [ -n "${RUN_URL:-}" ]; then
     printf ' · [run](%s)' "$RUN_URL"
   fi

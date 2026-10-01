@@ -34,9 +34,9 @@ What you actually ran, not what ought to pass:
 - The run on this branch, linked. CI triggers on `pull_request`, so it starts when this
   opens. A local suite is not a green CI run -- say which one you are reporting.
 - For report or UI changes, what you drove in a browser. The suite can only pin markup.
-  No need to paste a demo: the `demo gif` job films every scenario and keeps one inline
-  comment on this PR up to date. Say whether you read it, and quote any scenario it
-  reported red.
+  No need to paste a demo: the `demo gif` job films every scenario and keeps one comment on
+  this PR up to date, linking the film. Say whether you watched it, and quote any scenario
+  it reported red.
 
 Then whether `spec/cli.md` matches the behaviour that now exists. It is the contract; if
 behaviour moved and the spec did not, one of them is wrong.

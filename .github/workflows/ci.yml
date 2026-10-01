@@ -77,11 +77,14 @@ jobs:
           name: report-screenshots
           path: ${{ runner.temp }}/shots
 
-  # The demo-video skill, run in CI, and its GIF posted onto the pull request so a reviewer
-  # sees the app working without checking the branch out. Like `screenshots` this is a check
-  # that happens to produce a picture: the recorder exits non-zero when any scenario is red,
-  # which fails this job, and the comment then names the red ones rather than quietly showing
-  # a film of a broken app.
+  # The demo-video skill, run in CI, with its GIF published to an asset branch and one comment
+  # on the pull request linking it -- so a reviewer can watch the app work without checking the
+  # branch out. Linked and not embedded because this repository is private; the long reason is
+  # in .github/scripts/publish-demo-gif.sh, which is also where to look before changing it.
+  #
+  # Like `screenshots` this is a check that happens to produce a picture: the recorder exits
+  # non-zero when any scenario is red, which fails this job, and the comment then names the red
+  # ones rather than quietly linking a film of a broken app.
   demo:
     name: demo gif
     runs-on: ubuntu-latest
@@ -144,6 +147,7 @@ jobs:
           BASE: ${{ github.event.pull_request.base.ref }}
           REPO: ${{ github.repository }}
           BRANCH: demo-assets
+          SERVER_URL: ${{ github.server_url }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: .github/scripts/publish-demo-gif.sh

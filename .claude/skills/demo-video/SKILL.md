@@ -31,7 +31,7 @@ it has none.
 
 | Flag | Why |
 |---|---|
-| `--gif` | write `demo.gif` instead of `demo.mp4` — the one format a pull request renders inline |
+| `--gif` | write `demo.gif` instead of `demo.mp4` — what CI publishes for a pull request to link |
 | `--offline` | skip the one over-the-network scenario; everything else uses local fixtures |
 | `--repo <url>` | a different public repo for that scenario (default `anthropics/skills`) |
 | `--project <path>` | film a different checkout, e.g. a feature worktree |
@@ -83,13 +83,18 @@ the user at `demo-run/demo.mp4`; offer to open it rather than opening it unasked
 
 ## On a pull request, this runs itself
 
-The `demo gif` job in `.github/workflows/ci.yml` runs exactly this with `--gif --offline` and
-posts the result as one inline comment on the pull request, so a reviewer sees the app working
-without checking the branch out. **You do not need to run this by hand before opening a PR**,
-and the film does not belong in the PR body — `.github/scripts/publish-demo-gif.sh` keeps a
-single comment up to date per pull request. Run it locally when you want the film *now*, when
-you are iterating on the scenario list, or when the job has gone red and you are finding out
-why.
+The `demo gif` job in `.github/workflows/ci.yml` runs exactly this with `--gif --offline`,
+publishes the GIF to an orphan `demo-assets` branch and keeps one comment on the pull request
+linking it, so a reviewer can watch the app work without checking the branch out. **You do not
+need to run this by hand before opening a PR**, and the film does not belong in the PR body —
+`.github/scripts/publish-demo-gif.sh` keeps a single comment up to date per pull request. Run
+it locally when you want the film *now*, when you are iterating on the scenario list, or when
+the job has gone red and you are finding out why.
+
+The comment links the GIF rather than embedding it, because this repository is private and an
+embedded `raw.githubusercontent.com` image renders broken: that host needs a token and GitHub
+leaves same-repo raw URLs unproxied. The script's header has the measurements and says what to
+do differently if the repository ever goes public.
 
 ## Nothing is left behind, and nothing is visible to git
 
@@ -147,8 +152,10 @@ The mp4 is assembled by `ffmpeg` — from PATH, or from `imageio-ffmpeg`, which 
 fetches through `uv run --with` if it has to. With no ffmpeg at all it falls back to a GIF,
 and says so.
 
-`--gif` takes the Pillow path deliberately rather than as a fallback, and two things about it
-are calibrated rather than arbitrary:
+`--gif` takes the Pillow path deliberately rather than as a fallback — GitHub's file viewer
+animates a GIF on open, and a GIF is the only one of the two formats that could be embedded in
+a comment if this repository ever stopped being private. Two things about it are calibrated
+rather than arbitrary:
 
 - **One GIF frame per storyboard frame, carrying its own delay** — not resampled to a frame
   rate the way the mp4 is. The film is stills held for seconds at a time, and GIF stores every
