@@ -89,6 +89,17 @@ class ScanResult:
         """
         return json.dumps(self.matrix, separators=(",", ":"))
 
+    @property
+    def stars_key(self) -> str:
+        """Which repository a reader's stars in the report are filed under.
+
+        The browsable URL where there is one, because it is already normalised: the ssh and
+        https spellings of one GitHub repo, with ``.git`` or without, are one repository and
+        should share one set of stars. Elsewhere the URL as given is the best identity there
+        is. Never the commit or the ref -- a star is meant to outlive the next push.
+        """
+        return self.web_base_url or self.source.strip()
+
     def web_url_for(self, skill: Skill) -> str | None:
         """Browsable URL for a skill file, when the host layout is known."""
         if not self.web_base_url:

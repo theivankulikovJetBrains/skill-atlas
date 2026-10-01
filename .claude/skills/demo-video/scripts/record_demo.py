@@ -775,6 +775,14 @@ DRIVER_JS = r"""
     },
     matrix() { return all('.compare .matrix td'); },
     diagonal() { return all('.compare .matrix td.self'); },
+    // Clicked, not set: the star's listener is what stores it, so that is what has to run.
+    star(i) { rows()[i].querySelector('.star-btn').click(); },
+    starred: () => rows().filter((row) => row.querySelector('.star-btn').getAttribute('aria-pressed') === 'true'),
+    starredOnly() { q('.starred-btn').click(); },
+    stored() {
+      const key = 'skill-atlas:stars:' + q('table.skills').dataset.starsKey;
+      return JSON.parse(localStorage.getItem(key) || '[]');
+    },
   };
 
   try {
@@ -821,6 +829,7 @@ class UiStep:
     duration: float = 2.4
     strip_script: bool = False
     dark: bool = False
+    starred: tuple[int, ...] = ()  # rows the reader starred on an earlier visit, by position
 
 
 def ui_steps() -> list[UiStep]:
@@ -958,7 +967,52 @@ def ui_steps() -> list[UiStep]:
         ui.ok('ticks kept', ui.q('.compare-btn').textContent, 'Compare similarity (3)');
         ui.ok('rows untouched', ui.shown().length, ui.rows().length);
         """),
-        UiStep("UI-14", "Near-duplicates are grouped below the table, strongest first", "atlas", """
+        UiStep("UI-14", "A star beside every name; starring one lights up the Starred filter",
+               "public", """
+        ui.ok('a star on every row', ui.all('table.skills .star-btn').length, ui.rows().length);
+        ui.ok('the column is shown', getComputedStyle(ui.q('td.star')).display, 'table-cell');
+        ui.ok('nothing starred yet', ui.starred().length, 0);
+        ui.ok('so the filter is disabled', ui.q('.starred-btn').disabled, true);
+        ui.star(0);
+        ui.ok('the row is starred', ui.starred().length, 1);
+        ui.ok('the filter counts it', ui.q('.starred-btn').textContent, 'Starred (1)');
+        ui.ok('and is enabled', ui.q('.starred-btn').disabled, false);
+        ui.ok('the browser keeps its path',
+              JSON.stringify(ui.stored()), JSON.stringify([ui.rows()[0].querySelector('.star-btn').dataset.path]));
+        """),
+        UiStep("UI-15", "Stars from an earlier visit come back; Starred narrows the table to them",
+               "public", """
+        ui.ok('both stars restored on load', ui.starred().length, 2);
+        ui.ok('on the rows they were placed on',
+              ui.starred().map((row) => ui.rows().indexOf(row)).join(), '0,2');
+        ui.starredOnly();
+        ui.ok('the filter is on', ui.q('.starred-btn').getAttribute('aria-pressed'), 'true');
+        ui.ok('only the stars are left', ui.shown().length, 2);
+        ui.ok('the count says so', ui.q('.search-status').textContent,
+              '2 of ' + ui.rows().length + ' starred');
+        """, starred=(0, 2)),
+        UiStep("UI-16", "With Starred on, the search box searches only the stars", "public", """
+        ui.starredOnly();
+        ui.type('zzz-nothing-here');
+        ui.ok('nothing left', ui.shown().length, 0);
+        ui.ok('the miss is explained', ui.q('.no-matches').hidden, false);
+        ui.ok('as a miss among the starred', ui.q('.among-starred').hidden, false);
+        ui.type(ui.rows()[0].dataset.name);
+        ui.ok('the starred row is found', ui.shown().includes(ui.rows()[0]), true);
+        ui.ok('and nothing unstarred with it',
+              ui.shown().every((row) => ui.starred().includes(row)), true);
+        """, starred=(0,)),
+        UiStep("UI-17", "Unstar the last one under the filter and the table says nothing is starred",
+               "public", """
+        ui.starredOnly();
+        ui.star(0);
+        ui.ok('the row leaves the table at once', ui.shown().length, 0);
+        ui.ok('the table says why', ui.q('.no-stars').hidden, false);
+        ui.ok('and not with the query message', ui.q('.no-matches').hidden, true);
+        ui.ok('the filter is still reachable', ui.q('.starred-btn').disabled, false);
+        ui.ok('the browser forgot the star', ui.stored().length, 0);
+        """, starred=(0,)),
+        UiStep("UI-18", "Near-duplicates are grouped below the table, strongest first", "atlas", """
         const cards = ui.all('.similar .group');
         const scores = cards.map((card) => parseInt(card.querySelector('.score').textContent, 10));
         ui.ok('at least one group', cards.length > 0, true);
@@ -968,28 +1022,29 @@ def ui_steps() -> list[UiStep]:
         ui.ok('every skill is still listed on its own', ui.rows().length, 8);
         ui.hoist('.similar');
         """, duration=3.2),
-        UiStep("UI-15", "--no-similar: no groups, no comparison, the list untouched", "plain", """
+        UiStep("UI-19", "--no-similar: no groups, no comparison, the list untouched", "plain", """
         ui.ok('no comparison section', ui.q('.compare'), null);
         ui.ok('no compare button', ui.q('.compare-btn'), null);
         ui.ok('no checkbox column', ui.q('table.skills .pick'), null);
         ui.ok('the search box still works', ui.q('.search').hidden, false);
         ui.type('deploy');
         ui.ok('and still filters', ui.shown().length, 3);
+        ui.ok('stars do not need the comparison', ui.q('.starred-btn').hidden, false);
         """),
-        UiStep("UI-16", "Past 200 skills the comparison is dropped; the list is not", "bulk", """
+        UiStep("UI-20", "Past 200 skills the comparison is dropped; the list is not", "bulk", """
         ui.ok('201 rows', ui.rows().length, 201);
         ui.ok('no comparison at this size', ui.q('.compare'), null);
         ui.ok('search survives the size', ui.q('.search').hidden, false);
         ui.type('skill-19');
         ui.ok('filtering 201 rows', ui.shown().length, 10);
         """),
-        UiStep("UI-17", "A repo with no skills: a report that says so", "barren", """
+        UiStep("UI-21", "A repo with no skills: a report that says so", "barren", """
         ui.ok('no table', ui.q('table.skills'), null);
         ui.ok('no search box for an empty list', ui.q('.search'), null);
         ui.ok('it says nothing was found',
               document.body.textContent.toLowerCase().includes('no skills'), true);
         """),
-        UiStep("UI-18", "Without JavaScript: the whole table, and no dead controls", "public", """
+        UiStep("UI-22", "Without JavaScript: the whole table, and no dead controls", "public", """
         // `pickable` is added by the report's own script and is what reveals the checkbox
         // column, so its absence is the proof that none of that script ran.
         ui.ok('the report script did not run',
@@ -1000,8 +1055,10 @@ def ui_steps() -> list[UiStep]:
         ui.ok('and it really is out of the picture',
               getComputedStyle(ui.q('.search')).display, 'none');
         ui.ok('the compare button is hidden too', ui.q('.compare-btn').hidden, true);
+        ui.ok('so is the Starred filter', ui.q('.starred-btn').hidden, true);
+        ui.ok('and the star column', getComputedStyle(ui.q('td.star')).display, 'none');
         """, strip_script=True),
-        UiStep("UI-19", "The same report in dark mode", "public", """
+        UiStep("UI-23", "The same report in dark mode", "public", """
         ui.ok('dark preferred', matchMedia('(prefers-color-scheme: dark)').matches, true);
         ui.ok('the page follows it',
               getComputedStyle(document.body).backgroundColor !== 'rgb(255, 255, 255)', true);
@@ -1021,6 +1078,33 @@ def js_literal(text: str) -> str:
 UI_FALLBACK = {"public": "atlas"}
 
 
+def star_prelude(html: str, step: UiStep) -> str:
+    """A script ahead of the report's own, setting the stars the step starts from.
+
+    Stars live in the browser profile, and capture() hands one profile to frame after frame
+    -- every frame a file:// page, which Edge treats as one origin -- so a star placed in one
+    step would otherwise be waiting in whichever step that worker films next. Clearing them
+    first makes each frame a first visit; seeding `step.starred` is how a step films a
+    return visit, which a one-shot screenshot cannot reach by reloading. Paths come from the
+    report itself, so a step reads the same against the public repo and the offline fixture.
+    """
+    key = re.search(r'data-stars-key="([^"]*)"', html)
+    paths = [unescape(path) for path in re.findall(r'class="star-btn" data-path="([^"]*)"', html)]
+    seed = [paths[i] for i in step.starred if i < len(paths)]
+    def literal(value: object) -> str:
+        # json.dumps leaves "</" alone, and "</script>" inside a script body ends it.
+        return json.dumps(value).replace("</", "<\\/")
+
+    return f"""<script>
+try {{
+  for (const k of Object.keys(localStorage)) if (k.startsWith('skill-atlas:stars:')) localStorage.removeItem(k);
+  const seed = {literal(seed)};
+  if (seed.length) localStorage.setItem('skill-atlas:stars:' + {literal(unescape(key.group(1)) if key else "")},
+                                        JSON.stringify(seed));
+}} catch (error) {{}}
+</script>"""
+
+
 def build_ui_frames(steps: list[UiStep], reports: dict[str, Path]) -> list[tuple[UiStep, Frame]]:
     pairs: list[tuple[UiStep, Frame]] = []
     for step in steps:
@@ -1037,6 +1121,7 @@ def build_ui_frames(steps: list[UiStep], reports: dict[str, Path]) -> list[tuple
             # --blink-settings=scriptEnabled=false also breaks --screenshot, and the driver
             # itself still has to run to assert against the bare markup it leaves behind.
             html = re.sub(r"<script>.*?</script>", "", html, flags=re.DOTALL)
+        html = html.replace('<meta charset="utf-8">', '<meta charset="utf-8">\n' + star_prelude(html, step), 1)
         driver = (
             DRIVER_JS.replace("__STEP__", step.body)
             .replace("__ID__", js_literal(step.id))

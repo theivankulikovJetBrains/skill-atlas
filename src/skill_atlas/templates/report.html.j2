@@ -15,6 +15,10 @@
     --accent: #3b5bdb;
     --warn-bg: #fff4e5;
     --warn-text: #8a4b00;
+    {# Amber, the colour a star is expected to be, darkened until it holds 3:1 against the
+       hover surface as well as the page -- it is a control's state, not decoration, so it
+       gets the non-text contrast floor rather than whatever looks pleasant. #}
+    --star: #a86f00;
     {# One hue, four steps, light to dark: a similarity is a magnitude, and a magnitude
        gets a sequential ramp rather than a spread of hues. Every step keeps its text
        above 4.5:1 -- the number in the cell is the real answer and the tint only ranks
@@ -37,6 +41,7 @@
       --accent: #8da2fb;
       --warn-bg: #3a2a10;
       --warn-text: #f0b866;
+      --star: #f5c451;
       {# Chosen for this surface, not flipped: the light ramp runs toward dark, which on a
          dark page would drive the strongest cells back into the background. These four
          climb away from it instead, and the top one climbs clear past the body ink -- a
@@ -107,6 +112,21 @@
      script at the end of the document is there to compare what was ticked. #}
   th.pick, td.pick { display: none; width: 1px; padding-right: 0; }
   table.pickable th.pick, table.pickable td.pick { display: table-cell; }
+  {# The star column, collapsed for the same reason: a star that cannot be saved or filtered
+     on is a control that does nothing. #}
+  th.star, td.star { display: none; width: 1px; padding-left: .25rem; padding-right: 0; }
+  table.starrable th.star, table.starrable td.star { display: table-cell; }
+  {# The glyph comes from the stylesheet rather than the markup: the button is named by its
+     aria-label, so a screen reader hears "Star deploy, pressed" and not "black star". #}
+  .star-btn {
+    padding: 0 .15rem; background: none; border: none; border-radius: 4px;
+    color: var(--muted); font-size: 1.1rem; line-height: 1.4;
+  }
+  .star-btn::before { content: "\2606"; }
+  .star-btn:hover, .star-btn[aria-pressed="true"] { color: var(--star); }
+  .star-btn[aria-pressed="true"]::before { content: "\2605"; }
+  .starred-btn::before { content: "\2605"; margin-right: .35rem; color: var(--star); }
+  .starred-btn[aria-pressed="true"] { border-color: var(--star); }
   th.path, td.path { width: 34%; }
   td.path a { color: var(--accent); text-decoration: none; overflow-wrap: break-word; }
   td.path a:hover { text-decoration: underline; }
@@ -124,7 +144,7 @@
     padding: 2.5rem 1.25rem; text-align: center; color: var(--muted);
     background: var(--surface); border: 1px dashed var(--border); border-radius: 8px;
   }
-  .no-matches td { padding: 2.5rem .75rem; text-align: center; color: var(--muted); }
+  .no-matches td, .no-stars td { padding: 2.5rem .75rem; text-align: center; color: var(--muted); }
   .compare { margin-top: 3rem; }
   .compare-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
   .compare h2 { margin: 0 0 .3rem; font-size: 1.1rem; letter-spacing: -.01em; }
@@ -220,13 +240,17 @@
                autocomplete="off" spellcheck="false">
         <span class="search-status" role="status"></span>
       </div>
+      {# Hidden for the same reason as the box, and disabled until something is starred:
+         a filter down to nothing is not an offer worth making. #}
+      <button type="button" class="starred-btn" aria-pressed="false" hidden disabled>Starred</button>
       {% if result.comparable %}
         {# Same bargain as the search box, and disabled on top of it: one skill compares
            with nothing, so the button only lights up once a second row is ticked. #}
         <button type="button" class="compare-btn" hidden disabled>Compare similarity</button>
       {% endif %}
     </div>
-    <table class="skills">
+    {# Which repository the reader's stars are filed under -- see ScanResult.stars_key. #}
+    <table class="skills" data-stars-key="{{ result.stars_key }}">
       <caption>Every SKILL.md found in the repository, ordered by path.</caption>
       <thead>
         <tr>
@@ -235,6 +259,7 @@
               <input type="checkbox" class="pick-all" aria-label="Select every skill shown">
             </th>
           {% endif %}
+          <th scope="col" class="star" aria-label="Starred"></th>
           <th scope="col">Name</th><th scope="col">File</th><th scope="col">Description</th>
         </tr>
       </thead>
@@ -255,6 +280,12 @@
                        aria-label="Compare {{ skill.name }}">
               </td>
             {% endif %}
+            {# Filed under the path, not the name: two copies of one skill are starred
+               separately, and a skill renamed in its frontmatter keeps its star. #}
+            <td class="star">
+              <button type="button" class="star-btn" data-path="{{ skill.path }}" aria-pressed="false"
+                      aria-label="Star {{ skill.name }}"></button>
+            </td>
             <td class="name">{{ skill.name }}</td>
             <td class="path mono">
               {% if url %}
@@ -275,8 +306,13 @@
             </td>
           </tr>
         {% endfor %}
+        {% set columns = 5 if result.comparable else 4 %}
         <tr class="no-matches" hidden>
-          <td colspan="{{ 4 if result.comparable else 3 }}">No skill name contains <b class="query"></b>.</td>
+          <td colspan="{{ columns }}">No skill name contains <b class="query"></b><span class="among-starred" hidden>
+            among the starred ones</span>.</td>
+        </tr>
+        <tr class="no-stars" hidden>
+          <td colspan="{{ columns }}">Nothing is starred yet. The &#9734; beside a name stars it.</td>
         </tr>
       </tbody>
     </table>
@@ -365,9 +401,12 @@
     // and this runs while someone is still typing.
     const rows = [...table.querySelectorAll('tbody tr[data-name]')].map(row => {
       const pick = row.querySelector('.pick input');
+      const star = row.querySelector('.star-btn');
       return {
         row,
         pick,
+        star,
+        path: star.dataset.path,
         name: row.dataset.name,
         folded: row.dataset.name.toLowerCase(),
         // Which row and column of the score triangle this skill is, as the template
@@ -377,6 +416,69 @@
         dir: pick ? pick.dataset.dir : '',
       };
     });
+
+    // Stars live in the browser, not the report: the report is regenerated on every scan and
+    // overwritten in place, so anything stored in the document would be gone by the next one.
+    // One entry per repository, holding the paths starred in it.
+    const starKey = `skill-atlas:stars:${table.dataset.starsKey}`;
+    const noStars = document.querySelector('.no-stars');
+    const among = noMatches.querySelector('.among-starred');
+    const starredButton = document.querySelector('.starred-btn');
+    // Storage can be missing or refuse outright -- a privacy mode, a browser that will not
+    // store for file://, a full quota. A star then lasts as long as the page does, which is
+    // still worth having, so the failure turns into `store = null` rather than an error.
+    let store = null;
+    try {
+      store = window.localStorage;
+      store.getItem(starKey);
+    } catch {
+      store = null;
+    }
+    const readStars = () => {
+      try {
+        const saved = JSON.parse(store.getItem(starKey) || '[]');
+        return new Set(Array.isArray(saved) ? saved.filter(path => typeof path === 'string') : []);
+      } catch {
+        return new Set();
+      }
+    };
+    let stars = store ? readStars() : new Set();
+    let starredOnly = false;
+
+    const saveStar = (path, on) => {
+      // Read again before writing: another tab on the same repository may have starred
+      // something since this one loaded, and writing back an outdated set would undo it. The
+      // set also keeps paths this scan does not have -- a skill on another branch, or one
+      // that has since moved -- because this report has no business forgetting them.
+      if (store) stars = readStars();
+      if (on) stars.add(path);
+      else stars.delete(path);
+      if (!store) return;
+      try {
+        if (stars.size) store.setItem(starKey, JSON.stringify([...stars].sort()));
+        else store.removeItem(starKey);
+      } catch {
+        store = null;
+      }
+    };
+
+    const paintStars = () => {
+      let count = 0;
+      for (const { row, star, path } of rows) {
+        const on = stars.has(path);
+        star.setAttribute('aria-pressed', String(on));
+        row.classList.toggle('starred', on);
+        if (on) count += 1;
+      }
+      // Counted over this report's rows, not over everything stored: a star kept for a path
+      // this scan does not have is nothing the filter could show.
+      starredButton.textContent = count ? `Starred (${count})` : 'Starred';
+      starredButton.setAttribute('aria-pressed', String(starredOnly));
+      // Left enabled while the filter is on, so unstarring the last row never strands the
+      // reader in an empty table with the way back greyed out.
+      starredButton.disabled = count === 0 && !starredOnly;
+      return count;
+    };
 
     // Everything from here to `apply` is the comparison, which a report of fewer than two
     // skills leaves out entirely -- so the search below must work with all of it missing.
@@ -473,17 +575,46 @@
     const apply = () => {
       const typed = input.value.trim();
       const query = typed.toLowerCase();
+      const starred = paintStars();
       let shown = 0;
-      for (const { row, folded } of rows) {
-        const hit = !query || folded.includes(query);
+      for (const { row, folded, path } of rows) {
+        // The two filters narrow together: a query while Starred is on searches the stars.
+        const hit = (!query || folded.includes(query)) && (!starredOnly || stars.has(path));
         row.hidden = !hit;
         if (hit) shown += 1;
       }
       echo.textContent = typed;  // as text, so a query is never read back as markup
-      noMatches.hidden = shown > 0;
-      status.textContent = query ? `${shown} of ${rows.length} match` : '';
+      // An empty table has one of two causes, and each gets its own explanation: nothing
+      // starred at all, or nothing among what is starred that matches the query.
+      const nothingStarred = starredOnly && starred === 0;
+      noStars.hidden = !nothingStarred;
+      noMatches.hidden = shown > 0 || nothingStarred;
+      among.hidden = !starredOnly;
+      if (query) status.textContent = `${shown} of ${rows.length} match`;
+      else if (starredOnly) status.textContent = `${shown} of ${rows.length} starred`;
+      else status.textContent = '';
       syncPicks();
     };
+
+    table.addEventListener('click', event => {
+      const star = event.target.closest('.star-btn');
+      if (!star) return;
+      saveStar(star.dataset.path, star.getAttribute('aria-pressed') !== 'true');
+      // Unstarring a row while Starred is on drops it from the table at once. That is
+      // what the filter says it shows, and the star is one click from coming back.
+      apply();
+    });
+    starredButton.addEventListener('click', () => {
+      starredOnly = !starredOnly;
+      apply();
+    });
+    // A star placed in another tab on the same repository shows up here without a reload.
+    // `key` is null when the whole store was cleared, which concerns these stars too.
+    window.addEventListener('storage', event => {
+      if (!store || (event.key !== null && event.key !== starKey)) return;
+      stars = readStars();
+      apply();
+    });
 
     if (section) {
       table.addEventListener('change', event => {
@@ -516,6 +647,8 @@
       }
     });
 
+    table.classList.add('starrable');  // reveals the star column
+    starredButton.hidden = false;
     box.hidden = false;
     // Focus here rather than with the autofocus attribute, which the browser evaluates while
     // the box is still hidden and therefore cannot focus. Searching is all this page does.
