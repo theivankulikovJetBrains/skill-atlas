@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from skill_atlas.models import ScanResult, SimilarGroup, Skill
+from skill_atlas.repo import web_base_url
 from skill_atlas.report import format_console, write_html
 from skill_atlas.similarity import pairwise
 
@@ -382,7 +383,7 @@ class TestCompareMatrix:
 
     def test_the_empty_state_spans_the_extra_column(self, tmp_path: Path):
         html = self.render(tmp_path, self.scan(ALPHA, BRAVO))
-        assert '<td colspan="4">No skill name contains' in html
+        assert '<td colspan="5">No skill name contains' in html
 
     def test_one_skill_has_nothing_to_compare(self, tmp_path: Path):
         """pairwise() gives a lone skill one empty row, which is truthy and not a pair."""
@@ -391,7 +392,7 @@ class TestCompareMatrix:
         html = self.render(tmp_path, scan)
         assert 'class="compare"' not in html
         assert 'class="pick"' not in html
-        assert '<td colspan="3">No skill name contains' in html
+        assert '<td colspan="4">No skill name contains' in html
 
     def test_a_scan_that_skipped_the_comparison_shows_none_of_it(self, tmp_path: Path):
         """--no-similar, or a collection past the cap: the skills table is untouched."""
@@ -414,11 +415,121 @@ class TestCompareMatrix:
         assert html.index("</table>") < html.index('<section class="compare"')
         assert html.index('<section class="compare"') < html.index('<section class="similar">')
 
-    def test_the_search_box_is_still_the_only_thing_that_filters(self, tmp_path: Path):
-        """Both controls act on one table, so the compare column must not disturb the rows."""
+    def test_the_compare_column_does_not_disturb_the_rows(self, tmp_path: Path):
+        """Every control acts on one table, so the compare column must not disturb the rows."""
         html = self.render(tmp_path, self.scan(ALPHA, BRAVO))
         assert '<div class="search" role="search" hidden>' in html
         assert html.count('<tr data-name=') == 2
+
+
+class TestStars:
+    """Starring skills in the report, and filtering the table down to the starred ones.
+
+    The stars themselves live in the reader's browser and no browser runs here, so what is
+    pinned is what the script files them under -- a path per row and a key per repository --
+    and the controls it reveals.
+    """
+
+    def render(self, tmp_path: Path, scan: ScanResult) -> str:
+        return write_html(scan, tmp_path / "r.html").read_text(encoding="utf-8")
+
+    def test_every_row_gets_a_star_filed_under_its_path(self, tmp_path: Path):
+        html = self.render(tmp_path, result(ALPHA, BRAVO))
+        rows = re.findall(r'<tr data-name="([^"]*)">(.*?)</tr>', html, re.DOTALL)
+        assert [name for name, _ in rows] == ["alpha", "bravo"]
+        for (_, body), skill in zip(rows, (ALPHA, BRAVO)):
+            assert f'data-path="{skill.path}" aria-pressed="false"' in body
+
+    def test_two_copies_of_one_name_are_starred_separately(self, tmp_path: Path):
+        html = self.render(tmp_path, result(AGENTS_COPY, CLAUDE_COPY))
+        assert 'data-path=".agents/skills/deploy/SKILL.md"' in html
+        assert 'data-path=".claude/skills/deploy/SKILL.md"' in html
+
+    def test_a_star_is_labelled_with_the_skill_it_stars(self, tmp_path: Path):
+        html = self.render(tmp_path, result(ALPHA))
+        assert 'aria-label="Star alpha"' in html
+
+    def test_stars_are_filed_under_the_browsable_url_when_there_is_one(self, tmp_path: Path):
+        html = self.render(tmp_path, result(ALPHA))
+        assert '<table class="skills" data-stars-key="https://github.com/acme/widgets">' in html
+
+    def test_ssh_and_https_spellings_of_one_repo_share_their_stars(self):
+        keys = {
+            result(ALPHA, source=url, web_base_url=web_base_url(url)).stars_key
+            for url in (
+                "https://github.com/acme/widgets.git",
+                "https://github.com/acme/widgets",
+                "git@github.com:acme/widgets.git",
+            )
+        }
+        assert keys == {"https://github.com/acme/widgets"}
+
+    def test_an_unknown_host_files_them_under_the_url_as_given(self, tmp_path: Path):
+        scan = result(ALPHA, source=" file:///srv/widgets ", web_base_url=None)
+        assert scan.stars_key == "file:///srv/widgets"
+        assert 'data-stars-key="file:///srv/widgets"' in self.render(tmp_path, scan)
+
+    def test_a_star_outlives_the_commit_it_was_placed_on(self):
+        """Keyed by repository alone, so the next push does not wipe what the reader starred."""
+        assert result(ALPHA, commit="a" * 40).stars_key == result(ALPHA, commit="b" * 40).stars_key
+        assert result(ALPHA, ref="main").stars_key == result(ALPHA, ref="v2").stars_key
+
+    def test_the_script_keeps_them_in_the_browser_under_that_key(self, tmp_path: Path):
+        html = self.render(tmp_path, result(ALPHA))
+        assert "window.localStorage" in html
+        assert "`skill-atlas:stars:${table.dataset.starsKey}`" in html
+
+    def test_a_source_cannot_break_out_of_the_key_attribute(self, tmp_path: Path):
+        scan = result(ALPHA, source='https://evil/"><script>x</script>', web_base_url=None)
+        html = self.render(tmp_path, scan)
+        assert "<script>x</script>" not in html
+        assert 'data-stars-key="https://evil/"' not in html
+        assert "data-stars-key=" in html
+
+    def test_a_path_cannot_break_out_of_its_data_attribute(self, tmp_path: Path):
+        odd = Skill("odd", "d", 'skills/a "b" <c>/SKILL.md')
+        html = self.render(tmp_path, result(odd, web_base_url=None))
+        assert 'data-path="skills/a "b"' not in html
+        assert "<c>" not in html
+
+    def test_the_column_and_the_filter_ship_hidden_for_readers_without_javascript(
+        self, tmp_path: Path, shots
+    ):
+        report = write_html(result(ALPHA, BRAVO), tmp_path / "r.html")
+        # The same split as the search box and the compare button: what ships hidden is
+        # photographed without the script, and what the script reveals with it.
+        bare = shots.page(report, no_script=True)
+        bare.check("the Starred filter ships hidden and disabled",
+                   '<button type="button" class="starred-btn" aria-pressed="false" hidden disabled>'
+                   in bare.html)
+        shipped = shots.page(report)
+        shipped.check("the script reveals the filter", "starredButton.hidden = false" in shipped.html)
+        shipped.check("and a star beside every name",
+                      "table.classList.add('starrable')" in shipped.html
+                      and shipped.html.count('class="star-btn"') == 2)
+
+    def test_a_hidden_empty_state_waits_for_a_filter_with_nothing_starred(self, tmp_path: Path):
+        html = self.render(tmp_path, result(ALPHA, BRAVO))
+        assert '<tr class="no-stars" hidden>' in html
+        assert "Nothing is starred yet." in html
+        assert '<span class="among-starred" hidden>' in html
+
+    def test_both_empty_states_span_the_star_column(self, tmp_path: Path):
+        html = self.render(tmp_path, result(ALPHA, BRAVO))
+        assert '<td colspan="4">No skill name contains' in html
+        assert '<td colspan="4">Nothing is starred yet.' in html
+
+    def test_stars_do_not_depend_on_the_comparison(self, tmp_path: Path):
+        """--no-similar drops the checkboxes; a star is a different question and stays."""
+        html = self.render(tmp_path, result(ALPHA, BRAVO))
+        assert 'class="pick"' not in html
+        assert html.count('class="star-btn"') == 2
+
+    def test_an_empty_scan_has_nothing_to_star(self, tmp_path: Path):
+        html = self.render(tmp_path, result())
+        assert 'class="star-btn"' not in html
+        assert 'class="starred-btn"' not in html
+        assert "data-stars-key" not in html
 
 
 class TestUnusualPaths:
